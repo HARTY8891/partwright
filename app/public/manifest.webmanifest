@@ -1,0 +1,16 @@
+{
+  "name": "Partwright",
+  "short_name": "Partwright",
+  "description": "Parametric part modelling in the browser. No install, no account, works offline.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f3f4f6",
+  "theme_color": "#2456c7",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ],
+  "file_handlers": [
+    { "action": "./", "accept": { "application/json": [".pwpart"] } }
+  ]
+}

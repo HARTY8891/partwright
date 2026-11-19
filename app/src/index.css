@@ -1,0 +1,17 @@
+@import "tailwindcss";
+@import "./styles/tokens.css";
+@import "./styles/tailwind-theme.css";
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--pw-color-surface);
+    color: var(--pw-color-text);
+    font-family: var(--pw-font-sans);
+    font-size: var(--pw-text-sm);
+    line-height: var(--pw-text-sm-line);
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible { outline: 2px solid var(--pw-color-focus); outline-offset: 1px; }
+}
