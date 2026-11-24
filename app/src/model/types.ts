@@ -203,6 +203,33 @@ export interface HoleFeature extends FeatureBase {
   at: FacePoint | null;
   diameter: Param;
   end: { type: 'blind'; depth: Param } | { type: 'throughAll' };
+  /** hole wizard type; simple when missing */
+  kind?: 'simple' | 'counterbore' | 'countersink' | 'tapped';
+  /** ISO metric screw size ("M5") when picked from the table; none = custom sizes */
+  size?: string;
+  cbore?: { diameter: Param; depth: Param };
+  csink?: { diameter: Param; angle: Param };
+}
+
+/** A thin wall grown from an open line in a sketch, sideways until it meets the part. */
+export interface RibFeature extends FeatureBase {
+  type: 'rib';
+  sketchId: Id;
+  thickness: Param;
+  /** grow to the other side of the line (default: the side the part is on) */
+  flip: boolean;
+}
+
+/** A helix around a sketch circle: a path for sweeping springs and threads. */
+export interface HelixFeature extends FeatureBase {
+  type: 'helix';
+  sketchId: Id;
+  /** distance between turns */
+  pitch: Param;
+  turns: Param;
+  /** climb against the sketch normal */
+  reverse: boolean;
+  leftHand: boolean;
 }
 
 export interface ShellFeature extends FeatureBase {
@@ -227,12 +254,16 @@ export interface PatternFeature extends FeatureBase {
   reverse: boolean;
 }
 
-/** A solid read from a STEP file, kept inside the part (geometry only, no history). */
+/** A solid read from another program's file, kept inside the part (geometry only, no history). */
 export interface ImportFeature extends FeatureBase {
   type: 'import';
   fileName: string;
-  /** the STEP file's text */
+  /** how `step` is stored; missing means STEP (parts saved before other formats) */
+  format?: 'step' | 'brep' | 'stl';
+  /** the contents: STEP or BREP text, or base64 binary STL for a mesh */
   step: string;
+  /** meshes: triangles in each separate body, in order */
+  parts?: number[];
 }
 
 export interface MirrorFeature extends FeatureBase {
@@ -244,10 +275,11 @@ export interface MirrorFeature extends FeatureBase {
 
 export type Feature =
   | PlaneFeature | SketchFeature | ExtrudeFeature | RevolveFeature | EdgeFeature
-  | HoleFeature | ShellFeature | PatternFeature | MirrorFeature | ImportFeature | LoftFeature | SweepFeature | AxisFeature;
+  | HoleFeature | ShellFeature | PatternFeature | MirrorFeature | ImportFeature | LoftFeature | SweepFeature | AxisFeature
+  | RibFeature | HelixFeature;
 export type SolidFeature =
   | ExtrudeFeature | RevolveFeature | EdgeFeature | HoleFeature | ShellFeature | PatternFeature | MirrorFeature | ImportFeature
-  | LoftFeature | SweepFeature;
+  | LoftFeature | SweepFeature | RibFeature;
 export type SolidType = SolidFeature['type'];
 
 export interface PartDocument {
@@ -292,7 +324,7 @@ export interface Variable {
 }
 
 type Draft<T> = T extends unknown ? Omit<T, 'id' | 'name' | 'suppressed'> : never;
-export type FeatureDraft = Draft<SolidFeature> | Draft<PlaneFeature & { def: { type: 'offset' | 'angle' } }> | Draft<AxisFeature>;
+export type FeatureDraft = Draft<SolidFeature> | Draft<PlaneFeature & { def: { type: 'offset' | 'angle' } }> | Draft<AxisFeature> | Draft<HelixFeature>;
 export type ExtrudeDraft = Draft<ExtrudeFeature>;
 
 export const SCHEMA_VERSION = 1;
@@ -309,7 +341,9 @@ export const sketchesOf = (f: Feature): Id[] =>
       ? f.sketchIds
       : f.type === 'sweep'
         ? [f.profileId, f.pathId]
-        : [];
+        : f.type === 'rib' || f.type === 'helix'
+          ? [f.sketchId]
+          : [];
 
 export const usesSketch = (f: Feature): f is ExtrudeFeature | RevolveFeature =>
   f.type === 'extrude' || f.type === 'cutExtrude' || f.type === 'revolve' || f.type === 'cutRevolve';

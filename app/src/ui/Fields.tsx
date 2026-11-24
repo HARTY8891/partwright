@@ -55,6 +55,12 @@ interface NumberFieldProps {
 export function NumberField({ label, value, unit = 'mm', min, step = 1, vars, disabled, hideLabel, lengthUnits, onCommit }: NumberFieldProps) {
   const id = useId();
   const [text, setText] = useState(value);
+  // follow the value when it changes from outside (a preset, undo, another field)
+  const [shownValue, setShownValue] = useState(value);
+  if (value !== shownValue) {
+    setShownValue(value);
+    setText(value);
+  }
   const parsed = lengthUnits ? parseLength(text, lengthUnits, vars) : parseValue(text, vars);
   if (lengthUnits) unit = lengthUnits;
   const error = parsed.error ?? (min !== undefined && parsed.value! < min ? `Must be at least ${min}` : undefined);

@@ -86,6 +86,17 @@ function featureParams(f: Draft<Feature>, each: (p: Draft<Param> | undefined, ki
     case 'hole':
       each(f.diameter, 'length');
       if (f.end.type === 'blind') each(f.end.depth, 'length');
+      each(f.cbore?.diameter, 'length');
+      each(f.cbore?.depth, 'length');
+      each(f.csink?.diameter, 'length');
+      each(f.csink?.angle, 'angle');
+      break;
+    case 'rib':
+      each(f.thickness, 'length');
+      break;
+    case 'helix':
+      each(f.pitch, 'length');
+      each(f.turns, 'count');
       break;
     case 'shell':
       each(f.thickness, 'length');

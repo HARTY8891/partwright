@@ -4,13 +4,14 @@ import {
   Axis3D, Box, Circle, CircleDot, Eye, EyeOff, Hexagon, Layers, Maximize, Minus, MousePointer2, PenLine,
   RectangleHorizontal, Redo2, Rotate3D, Ruler, Scale3D, Scissors, Square, Trash2, Undo2, Pencil, Loader2,
   Spline, SquareDashed, Cylinder, MoveDiagonal, CircleDashed, PackageOpen, Columns3, RotateCw, FlipHorizontal2,
-  Layers2, Slash, Pentagon, RectangleEllipsis, Variable as VariableIcon, SquareSplitHorizontal, Waves, ScissorsLineDashed, ArrowRightToLine, FileInput, Blend, Route,
+  Layers2, Slash, TriangleRight, Cable, Pentagon, RectangleEllipsis, Variable as VariableIcon, SquareSplitHorizontal, Waves, ScissorsLineDashed, ArrowRightToLine, FileInput, Blend, Route,
 } from 'lucide-react';
 import { useDoc, consumedSketches, getSketch, type Tool } from '../store/docStore';
 import { exportFile, startKernelSync, useKernel } from '../store/rebuild';
 import { startAutosave, unsavedLocally } from '../store/autosave';
 import { saveFile, saveVersion } from '../store/storage';
 import { migrate } from '../model/migrate';
+import { IMPORT_ACCEPT, prepareImport } from '../model/importFormats';
 import { StartDialog, ErrorsDialog, VersionsDialog, useDialogs, useStartOnLaunch } from './Dialogs';
 import { RelationsPanel } from './RelationsPanel';
 import { CommandPalette, usePalette } from './CommandPalette';
@@ -149,7 +150,7 @@ function MenuBar() {
         <Item onSelect={() => exportFile('step')}>Export STEP…</Item>
         <Item onSelect={() => exportFile('3mf')}>Export 3MF (3D printing)…</Item>
         <Menu.Separator className="h-px my-2 bg-border" />
-        <Item onSelect={() => document.getElementById('import-step-input')?.click()}>Import STEP…</Item>
+        <Item onSelect={() => document.getElementById('import-step-input')?.click()}>Import (STEP, STL, OBJ, 3MF)…</Item>
       </MenuRoot>
       <MenuRoot label="Edit">
         <Item onSelect={() => useDialogs.getState().open('errors')}>Rebuild errors…</Item>
@@ -182,19 +183,19 @@ function MenuBar() {
       <a href="#design" className="text-text-muted hover:text-text">Design system</a>
       <input
         id="import-step-input"
-        aria-label="Import a STEP file"
+        aria-label="Import a 3D file"
         type="file"
-        accept=".step,.stp"
+        accept={IMPORT_ACCEPT}
         className="hidden"
         onChange={async (e) => {
           const f = e.target.files?.[0];
           e.target.value = '';
           if (!f) return;
           if (f.size > 20 * 1024 * 1024) return s.notify('error', `${f.name} is over 20 MB; it would make the part file too big.`);
-          const text = await f.text();
-          if (!/ISO-10303-21/.test(text.slice(0, 200))) return s.notify('error', `${f.name} does not look like a STEP file.`);
-          s.addImport(f.name, text);
-          s.notify('success', `Imported ${f.name}. It is a plain solid without history: add features on top of it.`);
+          const r = await prepareImport(f.name, new Uint8Array(await f.arrayBuffer()));
+          if ('error' in r) return s.notify('error', r.error);
+          s.addImport(f.name, r.data, r.format, r.parts);
+          s.notify('success', `Imported ${f.name}${r.note ? ` (${r.note})` : ''}. It is a plain solid without history: add features on top of it.`);
         }}
       />
       <input
@@ -279,6 +280,8 @@ function CommandRibbon() {
           {feat('revolve', <Rotate3D size={24} />, 'Revolve')}
           {feat('loft', <Blend size={24} />, 'Loft')}
           {feat('sweep', <Route size={24} />, 'Sweep')}
+          {feat('rib', <TriangleRight size={24} />, 'Rib')}
+          {feat('helix', <Cable size={24} />, 'Helix')}
           <RibbonDivider />
           {feat('cutExtrude', <Scissors size={24} />, 'Cut', 'X')}
           {feat('cutRevolve', <Cylinder size={24} />, 'Cut revolve')}
@@ -345,7 +348,7 @@ function CommandRibbon() {
 /* ---------- feature tree ---------- */
 
 const ICONS: Record<Feature['type'], ReactNode> = {
-  plane: <Square size={16} />, axis: <Slash size={16} />, sketch: <PenLine size={16} />, extrude: <Box size={16} />, cutExtrude: <Scissors size={16} />,
+  plane: <Square size={16} />, axis: <Slash size={16} />, rib: <TriangleRight size={16} />, helix: <Cable size={16} />, sketch: <PenLine size={16} />, extrude: <Box size={16} />, cutExtrude: <Scissors size={16} />,
   revolve: <Rotate3D size={16} />, cutRevolve: <Cylinder size={16} />, fillet: <CircleDot size={16} />, chamfer: <Hexagon size={16} />,
   hole: <CircleDashed size={16} />, shell: <PackageOpen size={16} />, linearPattern: <Columns3 size={16} />,
   circularPattern: <RotateCw size={16} />, mirror: <FlipHorizontal2 size={16} />, import: <FileInput size={16} />,
@@ -492,7 +495,7 @@ function RollbackBarRow({ index, max }: { index: number; max: number }) {
 const TITLES: Record<FeatureDraft['type'], string> = {
   extrude: 'Extrude', cutExtrude: 'Cut', revolve: 'Revolve', cutRevolve: 'Cut revolve', fillet: 'Fillet', chamfer: 'Chamfer',
   hole: 'Hole', shell: 'Shell', linearPattern: 'Linear pattern', circularPattern: 'Circular pattern', mirror: 'Mirror', plane: 'Plane', import: 'Imported solid',
-  loft: 'Loft', sweep: 'Sweep', axis: 'Reference axis',
+  loft: 'Loft', sweep: 'Sweep', axis: 'Reference axis', rib: 'Rib', helix: 'Helix',
 };
 
 function FeatureOptions() {
@@ -516,6 +519,8 @@ function FeatureOptions() {
         ? 'The yellow square shows the new plane.'
         : draft.type === 'axis'
           ? 'The yellow line shows the new axis.'
+          : draft.type === 'helix'
+            ? 'The yellow curve shows the helix. Use it as the path of a sweep.'
         : 'The yellow shape shows the result.');
   return (
     <div className="p-4">

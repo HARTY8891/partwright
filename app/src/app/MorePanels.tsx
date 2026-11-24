@@ -12,8 +12,9 @@ import { useKernel } from '../store/rebuild';
 import { kernel } from '../kernel/client';
 import { useView } from '../viewport/viewStore';
 import { faceLabel, vertexLabel } from '../model/refs';
+import { holeSize, ISO_HOLES } from '../model/holes';
 import { docVars, evalVariables, NAME_RE } from '../model/equations';
-import { isSeedType, type AxisFeature, type FeatureDraft, type PartDocument, type PatternAxis, type Variable } from '../model/types';
+import { isSeedType, sketchesOf, type AxisFeature, type FeatureDraft, type PartDocument, type PatternAxis, type Variable } from '../model/types';
 import { unitLabel } from '../model/units';
 import { PART_COLORS, useSettings } from '../store/settings';
 import tokens from '../../../replica/design/tokens.json';
@@ -37,7 +38,7 @@ export function MoreFeatureOptions({ draft }: { draft: D }) {
           items={draft.at ? [faceLabel(doc, draft.at.face)] : []}
           onRemove={() => s.updateDraft((d) => void (d.type === 'hole' && (d.at = null)))}
         />
-        <NumberField label="Diameter" value={draft.diameter.expr} {...len} onCommit={(expr, value) => s.updateDraft((d) => void (d.type === 'hole' && (d.diameter = { expr, value })))} />
+        <HoleWizard draft={draft} />
         <Select
           label="End condition"
           value={draft.end.type}
@@ -50,6 +51,26 @@ export function MoreFeatureOptions({ draft }: { draft: D }) {
         {draft.end.type === 'blind' && (
           <NumberField label="Depth" value={draft.end.depth.expr} {...len} onCommit={(expr, value) => s.updateDraft((d) => void (d.type === 'hole' && d.end.type === 'blind' && (d.end.depth = { expr, value })))} />
         )}
+      </PanelSection>
+    );
+
+  if (draft.type === 'rib')
+    return (
+      <PanelSection title="Rib">
+        <NumberField label="Thickness" value={draft.thickness.expr} {...len} onCommit={(expr, value) => s.updateDraft((d) => void (d.type === 'rib' && (d.thickness = { expr, value })))} />
+        <Checkbox label="Grow to the other side of the line" checked={draft.flip} onChange={(v) => s.updateDraft((d) => void (d.type === 'rib' && (d.flip = v)))} />
+        <p className="text-2xs text-text-muted">Draw an open line where the rib's edge goes. The rib grows from it, centred on the sketch plane, until it meets the part.</p>
+      </PanelSection>
+    );
+
+  if (draft.type === 'helix')
+    return (
+      <PanelSection title="Helix">
+        <NumberField label="Pitch" value={draft.pitch.expr} {...len} onCommit={(expr, value) => s.updateDraft((d) => void (d.type === 'helix' && (d.pitch = { expr, value })))} />
+        <NumberField label="Turns" value={draft.turns.expr} vars={vars} min={0.01} onCommit={(expr, value) => s.updateDraft((d) => void (d.type === 'helix' && (d.turns = { expr, value })))} />
+        <Checkbox label="Reverse direction" checked={draft.reverse} onChange={(v) => s.updateDraft((d) => void (d.type === 'helix' && (d.reverse = v)))} />
+        <Checkbox label="Left-handed" checked={draft.leftHand} onChange={(v) => s.updateDraft((d) => void (d.type === 'helix' && (d.leftHand = v)))} />
+        <p className="text-2xs text-text-muted">The helix starts on the circle's right-hand point (sketch +x). Draw the sweep profile there, on a plane through the axis.</p>
       </PanelSection>
     );
 
@@ -125,13 +146,14 @@ export function MoreFeatureOptions({ draft }: { draft: D }) {
   }
 
   if (draft.type === 'loft' || draft.type === 'sweep') {
-    const used = new Set(doc.features.flatMap((f) => (f.type === 'loft' || f.type === 'sweep' || 'sketchId' in f ? (f.type === 'loft' ? f.sketchIds : f.type === 'sweep' ? [f.profileId, f.pathId] : [(f as { sketchId: string }).sketchId]) : [])));
+    const used = new Set(doc.features.flatMap((f) => sketchesOf(f)));
+    const helices = doc.features.slice(0, doc.rollbackIndex).filter((f) => f.type === 'helix' && (!used.has(f.id) || (draft.type === 'sweep' && draft.pathId === f.id)));
     const sketches = doc.features.slice(0, doc.rollbackIndex).filter((f) => f.type === 'sketch' && (!used.has(f.id) || (draft.type === 'loft' ? draft.sketchIds.includes(f.id) : [draft.profileId, draft.pathId].includes(f.id))));
     if (draft.type === 'sweep')
       return (
         <PanelSection title="Profile and path">
           <Select label="Profile (closed outline)" value={draft.profileId} onChange={(v) => s.updateDraft((d) => void (d.type === 'sweep' && (d.profileId = v)))} options={sketches.map((f) => ({ value: f.id, label: f.name }))} />
-          <Select label="Path (open chain)" value={draft.pathId} onChange={(v) => s.updateDraft((d) => void (d.type === 'sweep' && (d.pathId = v)))} options={sketches.map((f) => ({ value: f.id, label: f.name }))} />
+          <Select label="Path (open chain or helix)" value={draft.pathId} onChange={(v) => s.updateDraft((d) => void (d.type === 'sweep' && (d.pathId = v)))} options={[...helices, ...sketches].map((f) => ({ value: f.id, label: f.name }))} />
           <p className="text-2xs text-text-muted">Draw the profile at the start of the path, on a plane square to it.</p>
         </PanelSection>
       );
@@ -566,6 +588,69 @@ export function ThinWall({ draft }: { draft: D }) {
         </>
       )}
     </PanelSection>
+  );
+}
+
+/* ---------- hole wizard ---------- */
+
+function HoleWizard({ draft }: { draft: Extract<D, { type: 'hole' }> }) {
+  const doc = useDoc((s) => s.doc);
+  const s = useDoc.getState();
+  const vars = docVars(doc);
+  const len = { lengthUnits: doc.units, vars, min: 0.001 } as const;
+  const kind = draft.kind ?? 'simple';
+  const P = (mm: number) => ({ expr: doc.units === 'in' ? String(+(mm / 25.4).toFixed(4)) : String(mm), value: mm });
+  /** set the sizes for a hole type and screw size from the ISO table */
+  const apply = (k: typeof kind, size: string | undefined) =>
+    s.updateDraft((d) => {
+      if (d.type !== 'hole') return;
+      d.kind = k;
+      d.size = size;
+      const h = holeSize(size);
+      if (h) d.diameter = P(k === 'tapped' ? h.tap : h.clearance);
+      const D = d.diameter.value;
+      d.cbore = k === 'counterbore' ? { diameter: P(h ? h.cboreD : Math.round(D * 1.8 * 10) / 10), depth: P(h ? h.cboreDepth : Math.round(D * 10) / 10) } : undefined;
+      d.csink = k === 'countersink' ? { diameter: P(h ? h.csinkD : Math.round(D * 2 * 10) / 10), angle: { expr: '90', value: 90 } } : undefined;
+    });
+  return (
+    <>
+      <Select
+        label="Hole type"
+        value={kind}
+        onChange={(v) => apply(v, draft.size)}
+        options={[
+          { value: 'simple', label: 'Simple' },
+          { value: 'counterbore', label: 'Counterbore' },
+          { value: 'countersink', label: 'Countersink' },
+          { value: 'tapped', label: 'Tapped (tap drill size)' },
+        ]}
+      />
+      <Select
+        label="Screw size"
+        value={draft.size ?? ''}
+        onChange={(v) => apply(kind, v || undefined)}
+        options={[{ value: '', label: 'Custom sizes' }, ...ISO_HOLES.map((h) => ({ value: h.size, label: `${h.size} (ISO metric)` }))]}
+      />
+      <NumberField
+        label={kind === 'tapped' ? 'Tap drill diameter' : 'Diameter'}
+        value={draft.diameter.expr}
+        {...len}
+        onCommit={(expr, value) => s.updateDraft((d) => void (d.type === 'hole' && ((d.diameter = { expr, value }), (d.size = undefined))))}
+      />
+      {draft.cbore && (
+        <>
+          <NumberField label="Counterbore diameter" value={draft.cbore.diameter.expr} {...len} onCommit={(expr, value) => s.updateDraft((d) => void (d.type === 'hole' && d.cbore && ((d.cbore.diameter = { expr, value }), (d.size = undefined))))} />
+          <NumberField label="Counterbore depth" value={draft.cbore.depth.expr} {...len} onCommit={(expr, value) => s.updateDraft((d) => void (d.type === 'hole' && d.cbore && ((d.cbore.depth = { expr, value }), (d.size = undefined))))} />
+        </>
+      )}
+      {draft.csink && (
+        <>
+          <NumberField label="Countersink diameter" value={draft.csink.diameter.expr} {...len} onCommit={(expr, value) => s.updateDraft((d) => void (d.type === 'hole' && d.csink && ((d.csink.diameter = { expr, value }), (d.size = undefined))))} />
+          <NumberField label="Countersink angle" unit="°" vars={vars} min={1} value={draft.csink.angle.expr} onCommit={(expr, value) => s.updateDraft((d) => void (d.type === 'hole' && d.csink && (d.csink.angle = { expr, value })))} />
+        </>
+      )}
+      {kind === 'tapped' && draft.size && <p className="text-2xs text-text-muted">Thread {draft.size} × coarse. The thread itself is not modelled; the hole is the tap drill size.</p>}
+    </>
   );
 }
 

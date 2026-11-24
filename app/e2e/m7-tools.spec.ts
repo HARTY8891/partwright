@@ -75,7 +75,7 @@ test.describe('milestone 7', () => {
       return new TextDecoder().decode(await kernel.exportFile('step'));
     });
     await store(page, `S().newDoc();`);
-    await page.getByLabel('Import a STEP file').setInputFiles({ name: 'box.step', mimeType: 'application/step', buffer: Buffer.from(step) });
+    await page.getByLabel('Import a 3D file').setInputFiles({ name: 'box.step', mimeType: 'application/step', buffer: Buffer.from(step) });
     await expect(page.getByText(/Imported box.step/)).toBeVisible();
     expect(await featureNames(page)).toContain('Import1');
     expect(await volume(page)).toBeCloseTo(60000, 0);
@@ -85,7 +85,7 @@ test.describe('milestone 7', () => {
   });
 
   test('STEP import refuses a file that is not STEP', async ({ page }) => {
-    await page.getByLabel('Import a STEP file').setInputFiles({ name: 'notes.step', mimeType: 'text/plain', buffer: Buffer.from('hello') });
+    await page.getByLabel('Import a 3D file').setInputFiles({ name: 'notes.step', mimeType: 'text/plain', buffer: Buffer.from('hello') });
     await expect(page.getByText('notes.step does not look like a STEP file.')).toBeVisible();
   });
 

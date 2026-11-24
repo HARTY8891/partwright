@@ -4,13 +4,16 @@
 import { expose, transfer } from 'comlink';
 import opencascade from 'replicad-opencascadejs';
 import wasmUrl from 'replicad-opencascadejs/wasm?url';
-import { DistanceQuery, makeVertex, draw, drawCircle, drawRectangle, EdgeFinder, genericSweep, importSTEP, FaceFinder, measureArea, measureShapeVolumeProperties, measureVolume, Plane, setOC, type Drawing, type Shape3D } from 'replicad';
-import type { EdgeRef, FeatureDraft, PartDocument, PatternAxis, SketchFeature } from '../model/types';
+import { DistanceQuery, makeBox, makeHelix, makeVertex, draw, drawCircle, drawRectangle, EdgeFinder, genericSweep, importSTEP, deserializeShape, makePolygon, makeSolid, getOC, cast, FaceFinder, measureArea, measureShapeVolumeProperties, measureVolume, Plane, setOC, type Drawing, type Shape3D } from 'replicad';
+import type { EdgeRef, FeatureDraft, HelixFeature, PartDocument, PatternAxis, RibFeature, SketchFeature } from '../model/types';
 import { isSeedType } from '../model/types';
 import { frameForSketch, planeById, planeFrame, add, cross, dot, neg, scale, toWorld, sub, type Vec3 } from '../model/planes';
 import { edgeLabel, edgePoint, extrudeExtent, facePointWorld, faceFrame, faceLabel, getSketchFeature, pointOf, THROUGH_ALL, vertexDepth, vertexLabel } from '../model/refs';
 import { nestLoops, sketchLoops, sketchPath, type Loop } from './profile';
 import { axisLine, resolveAxis } from '../model/axes';
+import { holeProfile } from '../model/holes';
+import { helixGeom } from '../model/helix';
+import { fromBase64, parseSTL, stlPart } from '../model/importFormats';
 
 export interface FeatureStatus {
   id: string;
@@ -207,14 +210,24 @@ function toolOf(doc: PartDocument, f: FeatureDraft): Tool {
       if (!f.at) throw new Error('Click a flat face to place the hole.');
       const frame = faceFrame(doc, f.at.face);
       if (!frame) throw new Error(`${faceLabel(doc, f.at.face)} no longer exists. Edit the hole and place it again.`);
-      const d = f.diameter.value;
-      if (!(d > 0)) throw new Error('The diameter must be more than zero.');
       const depth = f.end.type === 'throughAll' ? THROUGH_ALL : f.end.depth.value;
-      if (!(depth > 0)) throw new Error('Depth must be more than zero.');
+      const prof = holeProfile(
+        f.kind ?? 'simple',
+        f.diameter.value,
+        depth,
+        f.cbore && { d: f.cbore.diameter.value, depth: f.cbore.depth.value },
+        f.csink && { d: f.csink.diameter.value, angle: f.csink.angle.value },
+      );
+      if ('error' in prof) throw new Error(prof.error);
       const centre = toWorld(frame, f.at.at);
-      // drill into the material: against the face's outward normal
-      const plane = new Plane(centre, frame.xDir, neg(frame.normal));
-      return { solid: drawCircle(d / 2).sketchOnPlane(plane).extrude(depth) as Shape3D, cut: true };
+      // drill into the material, against the face's outward normal: the cross-section
+      // (radius, depth) lies in a plane through the axis and is turned about it
+      const down = neg(frame.normal);
+      const plane = new Plane(centre, frame.xDir, cross(frame.xDir, down));
+      let pen = draw(prof[0]);
+      for (const p of prof.slice(1)) pen = pen.lineTo(p);
+      const solid = pen.close().sketchOnPlane(plane).revolve(down, { origin: centre }) as Shape3D;
+      return { solid, cut: true };
     }
     case 'loft': {
       if (f.sketchIds.length < 2) throw new Error('Tick at least two sketches to loft between.');
@@ -234,20 +247,26 @@ function toolOf(doc: PartDocument, f: FeatureDraft): Tool {
     }
     case 'sweep': {
       const prof = sketchOf(doc, f.profileId);
-      const path = sketchOf(doc, f.pathId);
+      const helixPath = doc.features.find((x): x is HelixFeature => x.id === f.pathId && x.type === 'helix');
+      const path = helixPath ?? sketchOf(doc, f.pathId);
       if (prof.id === path.id) throw new Error('The profile and the path must be different sketches.');
       const { loops, error } = sketchLoops(prof.sketch);
       if (error) throw new Error(`${prof.name}: ${error}`);
       if (loops.length !== 1) throw new Error(`${prof.name} must be one closed outline (no holes) to sweep.`);
-      const chain = sketchPath(path.sketch);
-      if ('error' in chain) throw new Error(`${path.name}: ${chain.error}`);
-      let pen = draw([chain.start.x, chain.start.y]);
-      for (const s of chain.steps) {
-        if (s.kind === 'line') pen = pen.lineTo([s.to.x, s.to.y]);
-        else if (s.kind === 'arc') pen = pen.threePointsArcTo([s.to.x, s.to.y], [s.mid.x, s.mid.y]);
-        else for (const sp of s.spans) pen = pen.cubicBezierCurveTo([sp.p3.x, sp.p3.y], [sp.c1.x, sp.c1.y], [sp.c2.x, sp.c2.y]);
+      if (path.type !== 'helix' && path.type !== 'sketch') throw new Error('The path must be a sketch or a helix.');
+      let spine: { wire: Parameters<typeof genericSweep>[1] };
+      if (path.type === 'helix') spine = { wire: helixWire(doc, path) as unknown as Parameters<typeof genericSweep>[1] };
+      else {
+        const chain = sketchPath(path.sketch);
+        if ('error' in chain) throw new Error(`${path.name}: ${chain.error}`);
+        let pen = draw([chain.start.x, chain.start.y]);
+        for (const s of chain.steps) {
+          if (s.kind === 'line') pen = pen.lineTo([s.to.x, s.to.y]);
+          else if (s.kind === 'arc') pen = pen.threePointsArcTo([s.to.x, s.to.y], [s.mid.x, s.mid.y]);
+          else for (const sp of s.spans) pen = pen.cubicBezierCurveTo([sp.p3.x, sp.p3.y], [sp.c1.x, sp.c1.y], [sp.c2.x, sp.c2.y]);
+        }
+        spine = (chain.closed ? pen.close() : pen.done()).sketchOnPlane(planeFor(doc, path)) as unknown as { wire: Parameters<typeof genericSweep>[1] };
       }
-      const spine = (chain.closed ? pen.close() : pen.done()).sketchOnPlane(planeFor(doc, path)) as unknown as { wire: Parameters<typeof genericSweep>[1] };
       const profile = loopDrawing(loops[0]).sketchOnPlane(planeFor(doc, prof)) as unknown as { wire: Parameters<typeof genericSweep>[0] };
       try {
         return { solid: genericSweep(profile.wire, spine.wire, { frenet: true }) as Shape3D, cut: false };
@@ -276,9 +295,16 @@ function apply(doc: PartDocument, body: Shape3D | null, f: FeatureDraft): Shape3
     case 'plane':
     case 'axis':
       return body;
+    case 'helix': {
+      const g = helixGeom(doc, f);
+      if ('error' in g) throw new Error(g.error);
+      return body;
+    }
+    case 'rib':
+      return combine(body, ribSolid(doc, body, f), false);
     case 'import': {
-      const shape = imported.get(fnv(f.step).toString(36));
-      if (!shape) throw new Error(`${f.fileName} could not be read as a STEP file.`);
+      const shape = imported.get(importKey(f));
+      if (!shape) throw new Error(`${f.fileName} could not be turned into a solid${importErrors.has(importKey(f)) ? ` (${importErrors.get(importKey(f))})` : ''}.`);
       return combine(body, shape.clone() as Shape3D, false);
     }
     case 'extrude':
@@ -372,19 +398,55 @@ function apply(doc: PartDocument, body: Shape3D | null, f: FeatureDraft): Shape3
 
 /* ---------- imported STEP solids ---------- */
 
-/** STEP text hash -> solid. Reading STEP is asynchronous, so it happens before the rebuild. */
+/** file hash -> solid. Reading files is asynchronous, so it happens before the rebuild. */
 const imported = new Map<string, Shape3D>();
+const importErrors = new Map<string, string>();
+const importKey = (f: { step: string; format?: string }) => (f.format ?? 'step') + fnv(f.step).toString(36);
+
+/** One closed body of a mesh as a solid: a face per triangle, sewn, then flat neighbours merged. */
+function meshSolid(stl: Uint8Array): Shape3D {
+  const m = parseSTL(stl);
+  if ('error' in m) throw new Error(m.error);
+  const t = m.tris;
+  const faces = [];
+  for (let i = 0; i < t.length; i += 9) faces.push(makePolygon([[t[i], t[i + 1], t[i + 2]], [t[i + 3], t[i + 4], t[i + 5]], [t[i + 6], t[i + 7], t[i + 8]]]));
+  const solid = makeSolid(faces);
+  for (const fc of faces) fc.delete();
+  const oc = getOC();
+  const unify = new oc.ShapeUpgrade_UnifySameDomain(solid.wrapped, true, true, false);
+  unify.Build();
+  const merged = cast(unify.Shape()) as Shape3D;
+  unify.delete();
+  solid.delete();
+  if (!(measureVolume(merged) > 0)) throw new Error('a mesh body did not close into a solid');
+  return merged;
+}
+
+async function readImport(f: Extract<FeatureDraft, { type: 'import' }>): Promise<Shape3D> {
+  if (f.format === 'brep') return deserializeShape(f.step) as Shape3D;
+  if (f.format === 'stl') {
+    const all = fromBase64(f.step);
+    const parts = f.parts ?? [(all.length - 84) / 50];
+    let body: Shape3D | null = null;
+    for (let i = 0; i < parts.length; i++) {
+      const piece = meshSolid(stlPart(all, parts, i));
+      body = body ? (body.fuse(piece) as Shape3D) : piece;
+    }
+    if (!body) throw new Error('empty mesh');
+    return body;
+  }
+  return (await importSTEP(new Blob([f.step]))) as Shape3D;
+}
 
 async function loadImports(doc: PartDocument, extra?: FeatureDraft) {
   const steps = [...doc.features, ...(extra ? [extra] : [])].filter((f): f is Extract<FeatureDraft, { type: 'import' }> => f.type === 'import');
   for (const f of steps) {
-    const key = fnv(f.step).toString(36);
+    const key = importKey(f);
     if (imported.has(key)) continue;
     try {
-      const shape = (await importSTEP(new Blob([f.step]))) as Shape3D;
-      imported.set(key, shape);
-    } catch {
-      /* reported by apply() */
+      imported.set(key, await readImport(f));
+    } catch (e) {
+      importErrors.set(key, e instanceof Error ? e.message : String(e)); // reported by apply()
     }
   }
 }
@@ -514,6 +576,58 @@ function faceOwners(doc: PartDocument, mesh: MeshData): string[] | undefined {
     for (const q of queries) q.delete();
   }
   return owners;
+}
+
+/** A helix as a wire, turned so it starts where the viewport draws it (the circle's +x point). */
+function helixWire(doc: PartDocument, f: HelixFeature) {
+  const g = helixGeom(doc, f);
+  if ('error' in g) throw new Error(g.error);
+  let w = makeHelix(g.pitch, g.pitch * g.turns, g.radius, g.centre, g.dir, g.leftHand);
+  const sp = w.startPoint;
+  const a = sub([sp.x, sp.y, sp.z], g.centre);
+  const turn = Math.atan2(dot(cross(a, g.xDir), g.dir), dot(a, g.xDir));
+  if (Math.abs(turn) > 1e-9) w = w.rotate((turn * 180) / Math.PI, g.centre, g.dir);
+  return w;
+}
+
+/**
+ * A rib: the open line in the sketch, grown sideways (in the sketch plane) far
+ * enough to reach the part, `thickness` thick about the sketch plane, then cut
+ * back to the part's bounding box so it stops at the walls it meets.
+ */
+function ribSolid(doc: PartDocument, body: Shape3D | null, f: Pick<RibFeature, 'sketchId' | 'thickness' | 'flip'>): Shape3D {
+  if (!body) throw new Error('A rib needs a solid to grow into. Make a solid first.');
+  const sk = sketchOf(doc, f.sketchId);
+  const t = f.thickness.value;
+  if (!(t > 0)) throw new Error('The rib thickness must be more than zero.');
+  const chain = sketchPath(sk.sketch);
+  if ('error' in chain) throw new Error(`${sk.name}: ${chain.error}`);
+  if (chain.closed) throw new Error(`${sk.name}: a rib is drawn as an open line, not a closed outline.`);
+  const pts = [chain.start, ...chain.steps.map((s) => s.to)];
+  const a = pts[0], b = pts[pts.length - 1];
+  const len = Math.hypot(b.x - a.x, b.y - a.y);
+  if (len < 1e-9) throw new Error(`${sk.name}: the rib line has no length.`);
+  // sideways, square to the line from its start to its end; towards the part unless flipped
+  let n = { x: -(b.y - a.y) / len, y: (b.x - a.x) / len };
+  const frame = frameForSketch(doc, sk.id)!;
+  const com = measureShapeVolumeProperties(body).centerOfMass as unknown as Vec3;
+  const rel = sub(com, frame.origin);
+  const c = { x: dot(rel, frame.xDir), y: dot(rel, frame.yDir) };
+  if ((c.x - a.x) * n.x + (c.y - a.y) * n.y < 0) n = { x: -n.x, y: -n.y };
+  if (f.flip) n = { x: -n.x, y: -n.y };
+  const far = 4 * THROUGH_ALL;
+  let pen = draw([a.x, a.y]);
+  for (const s of chain.steps) {
+    if (s.kind === 'line') pen = pen.lineTo([s.to.x, s.to.y]);
+    else if (s.kind === 'arc') pen = pen.threePointsArcTo([s.to.x, s.to.y], [s.mid.x, s.mid.y]);
+    else for (const sp of s.spans) pen = pen.cubicBezierCurveTo([sp.p3.x, sp.p3.y], [sp.c1.x, sp.c1.y], [sp.c2.x, sp.c2.y]);
+  }
+  pen = pen.lineTo([b.x + n.x * far, b.y + n.y * far]).lineTo([a.x + n.x * far, a.y + n.y * far]);
+  const slab = pen.close().sketchOnPlane(planeFor(doc, sk, -t / 2)).extrude(t) as Shape3D;
+  const [lo, hi] = body.boundingBox.bounds;
+  const rib = slab.intersect(makeBox(lo, hi)) as Shape3D;
+  if (measureVolume(rib) < 1e-9) throw new Error('The rib does not reach the part. Flip its side or move the line.');
+  return rib;
 }
 
 function meshOf(body: Shape3D | null): MeshData | null {

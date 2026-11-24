@@ -104,8 +104,8 @@ interface State {
    */
   moveFeature(id: Id, toIndex: number): boolean;
   setVariables(vars: Variable[]): void;
-  /** add a solid read from a STEP file */
-  addImport(fileName: string, step: string): void;
+  /** add a solid read from another program's file (see model/importFormats) */
+  addImport(fileName: string, step: string, format?: 'step' | 'brep' | 'stl', parts?: number[]): void;
   updateDraft(fn: (d: Draft<FeatureDraft>) => void): void;
   toggleEdge(ref: EdgeRef): void;
   confirmFeature(): void;
@@ -130,7 +130,7 @@ export function makeDoc(units: Units = 'mm'): PartDocument {
 const BASE_NAMES: Record<FeatureDraft['type'], string> = {
   extrude: 'Extrude', cutExtrude: 'Cut', revolve: 'Revolve', cutRevolve: 'CutRevolve', fillet: 'Fillet', chamfer: 'Chamfer',
   hole: 'Hole', shell: 'Shell', linearPattern: 'LPattern', circularPattern: 'CPattern', mirror: 'Mirror', plane: 'Plane', import: 'Import',
-  loft: 'Loft', sweep: 'Sweep', axis: 'Axis',
+  loft: 'Loft', sweep: 'Sweep', axis: 'Axis', rib: 'Rib', helix: 'Helix',
 };
 
 /** Insert a new feature at the rollback bar and move the bar past it. */
@@ -739,15 +739,20 @@ export const useDoc = create<State>((set, get) => {
         return;
       }
       if (type === 'import') {
-        get().notify('info', 'Use File ▸ Import STEP to bring in a solid.');
+        get().notify('info', 'Use File ▸ Import to bring in a solid from a STEP, STL, OBJ, 3MF or BREP file.');
         return;
       }
       if (type === 'loft' || type === 'sweep') {
         // sketches not yet used by another feature, in history order
         const used = consumedSketches(doc0);
         const free = doc0.features.slice(0, doc0.rollbackIndex).filter((f) => f.type === 'sketch' && !used.has(f.id)).map((f) => f.id);
+        const helix = [...doc0.features.slice(0, doc0.rollbackIndex)].reverse().find((f) => f.type === 'helix' && !used.has(f.id));
+        if (type === 'sweep' && helix && free.length >= 1) {
+          set({ mode: { kind: 'feature', draft: { type, profileId: free[free.length - 1], pathId: helix.id } } });
+          return;
+        }
         if (free.length < 2) {
-          get().notify('info', type === 'loft' ? 'A loft needs two or more sketches with closed outlines.' : 'A sweep needs two sketches: an outline (profile) and a path.');
+          get().notify('info', type === 'loft' ? 'A loft needs two or more sketches with closed outlines.' : 'A sweep needs two sketches (an outline and a path), or an outline and a helix.');
           return;
         }
         draft = type === 'loft' ? { type, sketchIds: free.slice(-2), ruled: false } : { type, profileId: free[free.length - 2], pathId: free[free.length - 1] };
@@ -763,6 +768,23 @@ export const useDoc = create<State>((set, get) => {
       } else {
         const id = pickSketch(sid);
         if (!id) return;
+        if (type === 'rib') {
+          if (!hasSolid) {
+            get().notify('info', 'A rib grows into a solid. Make a solid first.');
+            return;
+          }
+          set({ mode: { kind: 'feature', draft: { type, sketchId: id, thickness: defaultLen(4, 0.15), flip: false } } });
+          return;
+        }
+        if (type === 'helix') {
+          const sk = getSketch(get().doc, id)!;
+          if (!sk.sketch.entities.some((e) => e.kind === 'circle' && !e.construction)) {
+            get().notify('info', 'A helix is built on a circle: draw a circle in the sketch first.');
+            return;
+          }
+          set({ mode: { kind: 'feature', draft: { type, sketchId: id, pitch: defaultLen(5, 0.2), turns: { expr: '4', value: 4 }, reverse: false, leftHand: false } } });
+          return;
+        }
         if (type === 'revolve' || type === 'cutRevolve') {
           const sk = getSketch(get().doc, id)!;
           const axis = sk.sketch.entities.find((e) => e.kind === 'line' && e.construction);
@@ -891,10 +913,11 @@ export const useDoc = create<State>((set, get) => {
       });
       return true;
     },
-    addImport: (fileName, step) => {
+    addImport: (fileName, step, format, parts) => {
       const id = uid();
       const name = nextName(get().doc, 'Import');
-      commit((d) => insertAtRollback(d, { id, name, suppressed: false, type: 'import', fileName, step } as Draft<Feature>), { selection: id });
+      const f = { id, name, suppressed: false, type: 'import', fileName, step, ...(format && format !== 'step' ? { format } : {}), ...(parts ? { parts } : {}) };
+      commit((d) => insertAtRollback(d, f as Draft<Feature>), { selection: id });
     },
     setVariables: (vars) => commit((d) => void (d.variables = vars as Draft<Variable>[])),
     cancelFeature: () => set({ mode: { kind: 'model' } }),

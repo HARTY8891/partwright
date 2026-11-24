@@ -8,6 +8,7 @@ import { useDoc, getSketch, consumedSketches, type PointPick } from '../store/do
 import { useKernel } from '../store/rebuild';
 import { DEFAULT_FRAMES, frameForSketch, planeFrame, toLocal, toWorld, add, dot, scale, sub, type Frame, type Vec3 } from '../model/planes';
 import { resolveAxis, type AxisDef } from '../model/axes';
+import { helixGeom, helixPoints } from '../model/helix';
 import { arcMid, candidateEdges, candidateVertices, distToSegments, edgePoint, faceFrame, facePointWorld, pickFace, vertexPoint } from '../model/refs';
 import type { EdgeRef, FaceRef, FacePoint, Id, PartDocument, PlaneFeature, Pt, Sketch, VertexRef } from '../model/types';
 import type { MeshData } from '../kernel/client';
@@ -176,8 +177,25 @@ function Planes() {
         ) : null,
       )}
       {mode.kind === 'feature' && mode.draft.type === 'axis' && <AxisLineView def={mode.draft.def} color={C.preview} />}
+      {doc.features.slice(0, doc.rollbackIndex).map((f) =>
+        f.type === 'helix' && !f.suppressed && !(mode.kind === 'feature' && mode.editingId === f.id) ? (
+          <HelixView key={f.id} helix={f} color={f.id === selection ? C.selected : C['model-edge']} />
+        ) : null,
+      )}
+      {mode.kind === 'feature' && mode.draft.type === 'helix' && <HelixView helix={mode.draft} color={C.preview} />}
     </>
   );
+}
+
+/** A helix curve (sweep path). */
+function HelixView({ helix, color }: { helix: Parameters<typeof helixGeom>[1]; color: string }) {
+  const doc = useDoc((s) => s.doc);
+  const pts = useMemo(() => {
+    const g = helixGeom(doc, helix);
+    return 'error' in g ? null : helixPoints(g);
+  }, [doc, helix]);
+  if (!pts) return null;
+  return <Line points={pts} color={color} lineWidth={1.5} depthTest={false} renderOrder={11} />;
 }
 
 /** A reference axis: a long dash-dot line through the model. */

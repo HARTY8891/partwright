@@ -50,7 +50,7 @@ function useCommands(): Command[] {
     tool('trim', 'Trim', 'Y'), tool('extend', 'Extend', 'W'), tool('dimension', 'Dimension', 'D'),
     feat('extrude', 'Extrude', 'E'), feat('cutExtrude', 'Cut', 'X'), feat('revolve', 'Revolve'), feat('cutRevolve', 'Cut revolve'),
     feat('fillet', 'Fillet'), feat('chamfer', 'Chamfer'), feat('shell', 'Shell'), feat('hole', 'Hole', 'H'),
-    feat('linearPattern', 'Linear pattern'), feat('circularPattern', 'Circular pattern'), feat('mirror', 'Mirror'), feat('plane', 'Reference plane'), feat('axis', 'Reference axis'),
+    feat('linearPattern', 'Linear pattern'), feat('circularPattern', 'Circular pattern'), feat('mirror', 'Mirror'), feat('plane', 'Reference plane'), feat('axis', 'Reference axis'), feat('rib', 'Rib'), feat('helix', 'Helix'),
     { id: 'measure', label: 'Measure', group: 'Evaluate', enabled: model, run: () => view.setMeasuring(true) },
     { id: 'mass', label: 'Mass properties', group: 'Evaluate', enabled: true, run: () => useToolDialogs.getState().set({ mass: true }) },
     { id: 'equations', label: 'Equations', group: 'Evaluate', enabled: true, run: () => useToolDialogs.getState().set({ equations: true }) },
@@ -73,7 +73,7 @@ function useCommands(): Command[] {
     { id: 'stl', label: 'Export STL', group: 'File', enabled: true, run: () => exportFile('stl') },
     { id: 'step', label: 'Export STEP', group: 'File', enabled: true, run: () => exportFile('step') },
     { id: '3mf', label: 'Export 3MF', group: 'File', enabled: true, run: () => exportFile('3mf') },
-    { id: 'import', label: 'Import STEP', group: 'File', enabled: true, run: () => document.getElementById('import-step-input')?.click() },
+    { id: 'import', label: 'Import STEP, STL, OBJ or 3MF', group: 'File', enabled: true, run: () => document.getElementById('import-step-input')?.click() },
     { id: 'options', label: 'Options', group: 'Tools', enabled: true, run: () => useToolDialogs.getState().set({ options: true }) },
   ];
 }
