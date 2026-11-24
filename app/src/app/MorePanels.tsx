@@ -13,7 +13,7 @@ import { kernel } from '../kernel/client';
 import { useView } from '../viewport/viewStore';
 import { faceLabel, vertexLabel } from '../model/refs';
 import { docVars, evalVariables, NAME_RE } from '../model/equations';
-import { isSeedType, type FeatureDraft, type Variable } from '../model/types';
+import { isSeedType, type AxisFeature, type FeatureDraft, type PartDocument, type PatternAxis, type Variable } from '../model/types';
 import { unitLabel } from '../model/units';
 import { PART_COLORS, useSettings } from '../store/settings';
 import tokens from '../../../replica/design/tokens.json';
@@ -89,13 +89,20 @@ export function MoreFeatureOptions({ draft }: { draft: D }) {
         ) : (
           <PanelSection title={draft.type === 'linearPattern' ? 'Direction and spacing' : 'Axis and angle'}>
             <Select
-              label={draft.type === 'linearPattern' ? 'Direction' : 'Axis (through the origin)'}
-              value={draft.axis}
-              onChange={(v) => s.updateDraft((d) => void ('axis' in d && (d.axis = v)))}
+              label={draft.type === 'linearPattern' ? 'Direction' : 'Axis'}
+              value={draft.axisId ? `ref:${draft.axisId}` : draft.axis}
+              onChange={(v) =>
+                s.updateDraft((d) => {
+                  if (d.type !== 'linearPattern' && d.type !== 'circularPattern') return;
+                  if (v.startsWith('ref:')) d.axisId = v.slice(4);
+                  else (d.axis = v as PatternAxis), (d.axisId = undefined);
+                })
+              }
               options={[
                 { value: 'x', label: 'X axis' },
                 { value: 'y', label: 'Y axis' },
                 { value: 'z', label: 'Z axis' },
+                ...referenceAxes(doc).map((a) => ({ value: `ref:${a.id}`, label: a.name })),
               ]}
             />
             <NumberField
@@ -176,6 +183,8 @@ export function MoreFeatureOptions({ draft }: { draft: D }) {
       </PanelSection>
     );
   }
+
+  if (draft.type === 'axis') return <AxisOptions draft={draft} />;
 
   if (draft.type === 'plane') {
     const def = draft.def;
@@ -560,6 +569,86 @@ export function ThinWall({ draft }: { draft: D }) {
   );
 }
 
+/* ---------- reference axis ---------- */
+
+/** Reference axes before the rollback bar, for axis pickers. */
+export const referenceAxes = (doc: PartDocument) =>
+  doc.features.slice(0, doc.rollbackIndex).filter((f): f is AxisFeature => f.type === 'axis' && !f.suppressed);
+
+function AxisOptions({ draft }: { draft: Extract<D, { type: 'axis' }> }) {
+  const doc = useDoc((s) => s.doc);
+  const s = useDoc.getState();
+  const before = doc.features.slice(0, doc.rollbackIndex).filter((f) => !f.suppressed);
+  const planes = before.filter((f) => f.type === 'plane').map((f) => ({ value: f.id, label: f.name }));
+  const lines = before.flatMap((f) =>
+    f.type !== 'sketch'
+      ? []
+      : f.sketch.entities
+          .filter((e) => e.kind === 'line')
+          .map((e, i) => ({ value: `${f.id}:${e.id}`, label: `${f.name}, ${e.construction ? 'centerline' : 'line'} ${i + 1}` })),
+  );
+  const rounds = before.flatMap((f) => {
+    if (f.type !== 'extrude' && f.type !== 'cutExtrude') return [];
+    const sk = doc.features.find((x) => x.id === f.sketchId);
+    if (!sk || sk.type !== 'sketch') return [];
+    return sk.sketch.entities
+      .filter((e) => (e.kind === 'circle' || e.kind === 'arc') && !e.construction)
+      .map((e, i) => ({ value: `${f.id}:${e.id}`, label: `${f.name}, ${e.kind} ${i + 1}` }));
+  });
+  const def = draft.def;
+  const set = (next: AxisFeature['def']) => s.updateDraft((d) => void (d.type === 'axis' && (d.def = next)));
+  const split = (v: string) => v.split(':') as [string, string];
+  return (
+    <PanelSection title="Axis">
+      <Select
+        label="Defined by"
+        value={def.type}
+        onChange={(v) => {
+          if (v === def.type) return;
+          if (v === 'planes') return set({ type: 'planes', a: planes[0].value, b: planes[1].value });
+          const list = v === 'sketchLine' ? lines : rounds;
+          if (!list.length) return s.notify('info', v === 'sketchLine' ? 'There is no sketch with a line yet.' : 'There is no extrude or cut with a circle or arc yet.');
+          const [a, b] = split(list[0].value);
+          set(v === 'sketchLine' ? { type: 'sketchLine', sketchId: a, lineId: b } : { type: 'cylinder', featureId: a, entityId: b });
+        }}
+        options={[
+          { value: 'planes', label: 'Where two planes meet' },
+          { value: 'sketchLine', label: 'A line in a sketch' },
+          { value: 'cylinder', label: 'The centre of a round extrude or cut' },
+        ]}
+      />
+      {def.type === 'planes' && (
+        <>
+          <Select label="First plane" value={def.a} onChange={(v) => set({ ...def, a: v })} options={planes} />
+          <Select label="Second plane" value={def.b} onChange={(v) => set({ ...def, b: v })} options={planes} />
+        </>
+      )}
+      {def.type === 'sketchLine' && (
+        <Select
+          label="Line"
+          value={`${def.sketchId}:${def.lineId}`}
+          onChange={(v) => {
+            const [a, b] = split(v);
+            set({ type: 'sketchLine', sketchId: a, lineId: b });
+          }}
+          options={lines}
+        />
+      )}
+      {def.type === 'cylinder' && (
+        <Select
+          label="Circle or arc"
+          value={`${def.featureId}:${def.entityId}`}
+          onChange={(v) => {
+            const [a, b] = split(v);
+            set({ type: 'cylinder', featureId: a, entityId: b });
+          }}
+          options={rounds}
+        />
+      )}
+    </PanelSection>
+  );
+}
+
 /* ---------- draft (extrude) ---------- */
 
 export function DraftOption({ draft }: { draft: D }) {
@@ -596,7 +685,7 @@ export function DraftOption({ draft }: { draft: D }) {
 
 export function FaceColour({ draft }: { draft: D }) {
   const s = useDoc.getState();
-  if (draft.type !== 'extrude' && draft.type !== 'cutExtrude') return null;
+  if (!isSeedType(draft.type)) return null;
   return (
     <PanelSection title="Appearance">
       <Select

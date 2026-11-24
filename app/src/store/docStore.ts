@@ -10,6 +10,7 @@ import { SCHEMA_VERSION, sketchesOf, isSeedType } from '../model/types';
 import { solveSketch, pointOf, type SolveResult } from '../solver/solve';
 import { sameEdge } from '../model/refs';
 import { applyEquations } from '../model/equations';
+import { axisInputs } from '../model/axes';
 import { rawVertexDepth, resolveVertexDepths } from '../model/refs';
 import { polygonShape, slotShape } from '../solver/shapes';
 import { extendLine, filletCorner, mirrorEntities, offsetEntities, trimLine } from '../solver/modify';
@@ -129,7 +130,7 @@ export function makeDoc(units: Units = 'mm'): PartDocument {
 const BASE_NAMES: Record<FeatureDraft['type'], string> = {
   extrude: 'Extrude', cutExtrude: 'Cut', revolve: 'Revolve', cutRevolve: 'CutRevolve', fillet: 'Fillet', chamfer: 'Chamfer',
   hole: 'Hole', shell: 'Shell', linearPattern: 'LPattern', circularPattern: 'CPattern', mirror: 'Mirror', plane: 'Plane', import: 'Import',
-  loft: 'Loft', sweep: 'Sweep',
+  loft: 'Loft', sweep: 'Sweep', axis: 'Axis',
 };
 
 /** Insert a new feature at the rollback bar and move the bar past it. */
@@ -159,10 +160,12 @@ export function directDependents(doc: PartDocument, id: Id): Feature[] {
     if (sketchesOf(x).includes(id)) return true;
     if (x.type === 'sketch') return x.on.kind === 'plane' ? x.on.featureId === id : x.on.face.featureId === id;
     if (x.type === 'fillet' || x.type === 'chamfer') return x.edges.some((e) => e.featureId === id);
-    if (x.type === 'linearPattern' || x.type === 'circularPattern') return x.seeds.includes(id);
+    if (x.type === 'linearPattern' || x.type === 'circularPattern') return x.seeds.includes(id) || x.axisId === id;
     if (x.type === 'mirror') return x.seeds.includes(id) || x.planeId === id;
     if (x.type === 'hole') return x.at?.face.featureId === id;
     if (x.type === 'shell') return x.faces.some((fp) => fp.face.featureId === id);
+    if (x.type === 'axis') return axisInputs(x.def).includes(id);
+    if ((x.type === 'revolve' || x.type === 'cutRevolve') && x.axisId === id) return true;
     if (x.type === 'plane' && x.def.type !== 'default')
       return x.def.base.kind === 'plane' ? x.def.base.featureId === id : x.def.base.face.featureId === id;
     return false;
@@ -705,6 +708,18 @@ export const useDoc = create<State>((set, get) => {
         set({ mode: { kind: 'feature', draft: { type: 'plane', def: { type: 'offset', base, distance: defaultLen(20, 1) } } } });
         return;
       }
+      if (type === 'axis') {
+        // start from what is selected: a sketch with a line, or two planes (default: Front and Top)
+        const sel = doc0.features.find((f) => f.id === get().selection);
+        const line = sel?.type === 'sketch' ? sel.sketch.entities.find((e) => e.kind === 'line') : undefined;
+        const planes = doc0.features.slice(0, doc0.rollbackIndex).filter((f) => f.type === 'plane' && !f.suppressed);
+        const def =
+          sel?.type === 'sketch' && line
+            ? { type: 'sketchLine' as const, sketchId: sel.id, lineId: line.id }
+            : { type: 'planes' as const, a: sel?.type === 'plane' ? sel.id : planes[0].id, b: planes.find((p) => p.id !== (sel?.type === 'plane' ? sel.id : planes[0].id))!.id };
+        set({ mode: { kind: 'feature', draft: { type: 'axis', def } } });
+        return;
+      }
       if (type === 'hole' || type === 'shell' || type === 'linearPattern' || type === 'circularPattern' || type === 'mirror') {
         if (!hasSolid) {
           get().notify('info', 'Make a solid first.');
@@ -751,11 +766,12 @@ export const useDoc = create<State>((set, get) => {
         if (type === 'revolve' || type === 'cutRevolve') {
           const sk = getSketch(get().doc, id)!;
           const axis = sk.sketch.entities.find((e) => e.kind === 'line' && e.construction);
-          if (!axis) {
-            get().notify('info', 'A revolve needs an axis: draw a centerline in the sketch first.');
+          const ref = get().doc.features.slice(0, get().doc.rollbackIndex).find((f) => f.type === 'axis' && !f.suppressed);
+          if (!axis && !ref) {
+            get().notify('info', 'A revolve needs an axis: draw a centerline in the sketch, or add a reference axis.');
             return;
           }
-          draft = { type, sketchId: id, axisLineId: axis.id, angle: { expr: '360', value: 360 }, reverse: false };
+          draft = { type, sketchId: id, axisLineId: axis?.id ?? '', axisId: axis ? undefined : ref!.id, angle: { expr: '360', value: 360 }, reverse: false };
         } else {
           const cut = type === 'cutExtrude';
           draft = {

@@ -6,7 +6,8 @@ import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import tokens from '../../../replica/design/tokens.json';
 import { useDoc, getSketch, consumedSketches, type PointPick } from '../store/docStore';
 import { useKernel } from '../store/rebuild';
-import { DEFAULT_FRAMES, frameForSketch, planeFrame, toLocal, toWorld, dot, sub, type Frame, type Vec3 } from '../model/planes';
+import { DEFAULT_FRAMES, frameForSketch, planeFrame, toLocal, toWorld, add, dot, scale, sub, type Frame, type Vec3 } from '../model/planes';
+import { resolveAxis, type AxisDef } from '../model/axes';
 import { arcMid, candidateEdges, candidateVertices, distToSegments, edgePoint, faceFrame, facePointWorld, pickFace, vertexPoint } from '../model/refs';
 import type { EdgeRef, FaceRef, FacePoint, Id, PartDocument, PlaneFeature, Pt, Sketch, VertexRef } from '../model/types';
 import type { MeshData } from '../kernel/client';
@@ -169,8 +170,24 @@ function Planes() {
         ) : null,
       )}
       {draft && <PlaneQuad doc={doc} plane={draft} selected active={false} interactive={false} preview />}
+      {doc.features.slice(0, doc.rollbackIndex).map((f) =>
+        f.type === 'axis' && !f.suppressed && !(mode.kind === 'feature' && mode.editingId === f.id) && ((show && !sketching) || f.id === selection) ? (
+          <AxisLineView key={f.id} def={f.def} color={f.id === selection ? C.selected : C['plane-fill']} />
+        ) : null,
+      )}
+      {mode.kind === 'feature' && mode.draft.type === 'axis' && <AxisLineView def={mode.draft.def} color={C.preview} />}
     </>
   );
+}
+
+/** A reference axis: a long dash-dot line through the model. */
+function AxisLineView({ def, color }: { def: AxisDef; color: string }) {
+  const doc = useDoc((s) => s.doc);
+  const r = resolveAxis(doc, def);
+  if ('error' in r) return null;
+  const L = PLANE_HALF * 1.4;
+  const pts: Vec3[] = [add(r.origin, scale(r.dir, -L)), add(r.origin, scale(r.dir, L))];
+  return <Line points={pts} color={color} lineWidth={1.5} dashed dashSize={4} gapSize={1.5} depthTest={false} renderOrder={11} />;
 }
 
 function PlaneQuad({ doc, plane, selected, active, interactive, preview }: { doc: PartDocument; plane: PlaneFeature; selected: boolean; active: boolean; interactive: boolean; preview?: boolean }) {
@@ -231,25 +248,21 @@ function useMeshGeometry(mesh: MeshData | null) {
 }
 
 /**
- * Per-vertex colours when any feature has its own colour: each model face is
- * named (pickFace) and takes the colour of the feature that made it.
+ * Per-vertex colours when any feature has its own colour: each model face
+ * takes the colour of the feature that made it (found by the kernel).
  */
 function useFaceColors(mesh: MeshData | null, doc: PartDocument): THREE.BufferAttribute | null {
   return useMemo(() => {
-    if (!mesh || !mesh.faceGroups || !doc.features.some((f) => f.color && !f.suppressed)) return null;
+    if (!mesh || !mesh.faceOwners || !doc.features.some((f) => f.color && !f.suppressed)) return null;
     const tok = C as Record<string, string>;
     const base = new THREE.Color(tok[doc.color ?? ''] ?? C['model-face']);
     const colors = new Float32Array(mesh.vertices.length);
     for (let i = 0; i < colors.length; i += 3) (colors[i] = base.r), (colors[i + 1] = base.g), (colors[i + 2] = base.b);
-    const v = mesh.vertices, n = mesh.normals, t = mesh.triangles;
+    const t = mesh.triangles;
     for (let k = 0; k < mesh.faceGroups.length; k += 2) {
       const start = mesh.faceGroups[k], count = mesh.faceGroups[k + 1];
-      if (!count) continue;
-      const [i0, i1, i2] = [t[start], t[start + 1], t[start + 2]];
-      const c: Vec3 = [0, 1, 2].map((a) => (v[i0 * 3 + a] + v[i1 * 3 + a] + v[i2 * 3 + a]) / 3) as Vec3;
-      const nn: Vec3 = [n[i0 * 3], n[i0 * 3 + 1], n[i0 * 3 + 2]];
-      const ref = pickFace(doc, c, nn);
-      const col = ref && doc.features.find((f) => f.id === ref.featureId)?.color;
+      const owner: string = mesh.faceOwners[k / 2];
+      const col = owner && doc.features.find((f) => f.id === owner)?.color;
       if (!col || !tok[col]) continue;
       const fc = new THREE.Color(tok[col]);
       for (let j = start; j < start + count; j++) {

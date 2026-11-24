@@ -50,7 +50,7 @@ function useCommands(): Command[] {
     tool('trim', 'Trim', 'Y'), tool('extend', 'Extend', 'W'), tool('dimension', 'Dimension', 'D'),
     feat('extrude', 'Extrude', 'E'), feat('cutExtrude', 'Cut', 'X'), feat('revolve', 'Revolve'), feat('cutRevolve', 'Cut revolve'),
     feat('fillet', 'Fillet'), feat('chamfer', 'Chamfer'), feat('shell', 'Shell'), feat('hole', 'Hole', 'H'),
-    feat('linearPattern', 'Linear pattern'), feat('circularPattern', 'Circular pattern'), feat('mirror', 'Mirror'), feat('plane', 'Reference plane'),
+    feat('linearPattern', 'Linear pattern'), feat('circularPattern', 'Circular pattern'), feat('mirror', 'Mirror'), feat('plane', 'Reference plane'), feat('axis', 'Reference axis'),
     { id: 'measure', label: 'Measure', group: 'Evaluate', enabled: model, run: () => view.setMeasuring(true) },
     { id: 'mass', label: 'Mass properties', group: 'Evaluate', enabled: true, run: () => useToolDialogs.getState().set({ mass: true }) },
     { id: 'equations', label: 'Equations', group: 'Evaluate', enabled: true, run: () => useToolDialogs.getState().set({ equations: true }) },

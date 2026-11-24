@@ -154,6 +154,8 @@ export interface RevolveFeature extends FeatureBase {
   sketchId: Id;
   /** a construction line in the sketch */
   axisLineId: Id;
+  /** a reference axis to turn about instead of the sketch line */
+  axisId?: Id;
   /** degrees */
   angle: Param;
   reverse: boolean;
@@ -166,6 +168,18 @@ export interface EdgeFeature extends FeatureBase {
   size: Param;
   /** fillet only: a different radius at the other end of each edge (variable radius) */
   size2?: Param;
+}
+
+/** A reference axis, for revolves and patterns. */
+export interface AxisFeature extends FeatureBase {
+  type: 'axis';
+  def:
+    /** where two planes meet */
+    | { type: 'planes'; a: Id; b: Id }
+    /** along a line in a sketch */
+    | { type: 'sketchLine'; sketchId: Id; lineId: Id }
+    /** through the centre of a circle or arc of an extrude or cut (the axis of its round face) */
+    | { type: 'cylinder'; featureId: Id; entityId: Id };
 }
 
 /** A solid blended through two or more closed outlines, in order. */
@@ -205,6 +219,8 @@ export interface PatternFeature extends FeatureBase {
   /** features to repeat (extrudes, cuts, revolves, holes) */
   seeds: Id[];
   axis: PatternAxis;
+  /** a reference axis to use instead of x, y or z */
+  axisId?: Id;
   count: number;
   /** linear: spacing between copies. circular: total angle in degrees */
   spacing: Param;
@@ -228,7 +244,7 @@ export interface MirrorFeature extends FeatureBase {
 
 export type Feature =
   | PlaneFeature | SketchFeature | ExtrudeFeature | RevolveFeature | EdgeFeature
-  | HoleFeature | ShellFeature | PatternFeature | MirrorFeature | ImportFeature | LoftFeature | SweepFeature;
+  | HoleFeature | ShellFeature | PatternFeature | MirrorFeature | ImportFeature | LoftFeature | SweepFeature | AxisFeature;
 export type SolidFeature =
   | ExtrudeFeature | RevolveFeature | EdgeFeature | HoleFeature | ShellFeature | PatternFeature | MirrorFeature | ImportFeature
   | LoftFeature | SweepFeature;
@@ -276,7 +292,7 @@ export interface Variable {
 }
 
 type Draft<T> = T extends unknown ? Omit<T, 'id' | 'name' | 'suppressed'> : never;
-export type FeatureDraft = Draft<SolidFeature> | Draft<PlaneFeature & { def: { type: 'offset' | 'angle' } }>;
+export type FeatureDraft = Draft<SolidFeature> | Draft<PlaneFeature & { def: { type: 'offset' | 'angle' } }> | Draft<AxisFeature>;
 export type ExtrudeDraft = Draft<ExtrudeFeature>;
 
 export const SCHEMA_VERSION = 1;

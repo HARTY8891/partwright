@@ -4,7 +4,7 @@ import {
   Axis3D, Box, Circle, CircleDot, Eye, EyeOff, Hexagon, Layers, Maximize, Minus, MousePointer2, PenLine,
   RectangleHorizontal, Redo2, Rotate3D, Ruler, Scale3D, Scissors, Square, Trash2, Undo2, Pencil, Loader2,
   Spline, SquareDashed, Cylinder, MoveDiagonal, CircleDashed, PackageOpen, Columns3, RotateCw, FlipHorizontal2,
-  Layers2, Pentagon, RectangleEllipsis, Variable as VariableIcon, SquareSplitHorizontal, Waves, ScissorsLineDashed, ArrowRightToLine, FileInput, Blend, Route,
+  Layers2, Slash, Pentagon, RectangleEllipsis, Variable as VariableIcon, SquareSplitHorizontal, Waves, ScissorsLineDashed, ArrowRightToLine, FileInput, Blend, Route,
 } from 'lucide-react';
 import { useDoc, consumedSketches, getSketch, type Tool } from '../store/docStore';
 import { exportFile, startKernelSync, useKernel } from '../store/rebuild';
@@ -14,6 +14,7 @@ import { migrate } from '../model/migrate';
 import { StartDialog, ErrorsDialog, VersionsDialog, useDialogs, useStartOnLaunch } from './Dialogs';
 import { RelationsPanel } from './RelationsPanel';
 import { CommandPalette, usePalette } from './CommandPalette';
+import { referenceAxes } from './MorePanels';
 import { ConfigPicker, ConfigurationsDialog, EquationsDialog, MassDialog, MeasurePanel, MoreFeatureOptions, OptionsDialog, PolygonOptions, SecondDirection, SectionPanel, ThinWall, DraftOption, FaceColour, needsPick, useToolDialogs } from './MorePanels';
 import { RollbackBar } from '../ui/Tree';
 import { docVars } from '../model/equations';
@@ -292,6 +293,7 @@ function CommandRibbon() {
           {feat('mirror', <FlipHorizontal2 size={24} />, 'Mirror')}
           <RibbonDivider />
           {feat('plane', <Layers2 size={24} />, 'Plane')}
+          {feat('axis', <Slash size={24} />, 'Axis')}
         </Ribbon>
       </RibbonTabPanel>
       <RibbonTabPanel value="Sketch">
@@ -343,7 +345,7 @@ function CommandRibbon() {
 /* ---------- feature tree ---------- */
 
 const ICONS: Record<Feature['type'], ReactNode> = {
-  plane: <Square size={16} />, sketch: <PenLine size={16} />, extrude: <Box size={16} />, cutExtrude: <Scissors size={16} />,
+  plane: <Square size={16} />, axis: <Slash size={16} />, sketch: <PenLine size={16} />, extrude: <Box size={16} />, cutExtrude: <Scissors size={16} />,
   revolve: <Rotate3D size={16} />, cutRevolve: <Cylinder size={16} />, fillet: <CircleDot size={16} />, chamfer: <Hexagon size={16} />,
   hole: <CircleDashed size={16} />, shell: <PackageOpen size={16} />, linearPattern: <Columns3 size={16} />,
   circularPattern: <RotateCw size={16} />, mirror: <FlipHorizontal2 size={16} />, import: <FileInput size={16} />,
@@ -490,7 +492,7 @@ function RollbackBarRow({ index, max }: { index: number; max: number }) {
 const TITLES: Record<FeatureDraft['type'], string> = {
   extrude: 'Extrude', cutExtrude: 'Cut', revolve: 'Revolve', cutRevolve: 'Cut revolve', fillet: 'Fillet', chamfer: 'Chamfer',
   hole: 'Hole', shell: 'Shell', linearPattern: 'Linear pattern', circularPattern: 'Circular pattern', mirror: 'Mirror', plane: 'Plane', import: 'Imported solid',
-  loft: 'Loft', sweep: 'Sweep',
+  loft: 'Loft', sweep: 'Sweep', axis: 'Reference axis',
 };
 
 function FeatureOptions() {
@@ -512,6 +514,8 @@ function FeatureOptions() {
       ? `Using ${sketch.name}${sketch.on.kind === 'face' ? ` on ${faceLabel(doc, sketch.on.face)}` : ''}. The yellow shape shows the result.`
       : draft.type === 'plane'
         ? 'The yellow square shows the new plane.'
+        : draft.type === 'axis'
+          ? 'The yellow line shows the new axis.'
         : 'The yellow shape shows the result.');
   return (
     <div className="p-4">
@@ -574,12 +578,20 @@ function FeatureOptions() {
         {(draft.type === 'revolve' || draft.type === 'cutRevolve') && sketch && (
           <PanelSection title="Axis and angle">
             <Select
-              label="Axis (a centerline in the sketch)"
-              value={draft.axisLineId}
-              onChange={(v) => s.updateDraft((d) => void ('axisLineId' in d && (d.axisLineId = v)))}
-              options={sketch.sketch.entities
+              label="Axis"
+              value={draft.axisId ? `ref:${draft.axisId}` : draft.axisLineId}
+              onChange={(v) =>
+                s.updateDraft((d) => {
+                  if (!('axisLineId' in d)) return;
+                  if (v.startsWith('ref:')) d.axisId = v.slice(4);
+                  else (d.axisLineId = v), (d.axisId = undefined);
+                })
+              }
+              options={[
+                ...referenceAxes(doc).map((a) => ({ value: `ref:${a.id}`, label: a.name })),
+                ...sketch.sketch.entities
                 .filter((e) => e.kind === 'line' && e.construction)
-                .map((e, i) => ({ value: e.id, label: `Centerline ${i + 1}` }))}
+                .map((e, i) => ({ value: e.id, label: `Centerline ${i + 1}` }))]}
             />
             <NumberField
               label="Angle"

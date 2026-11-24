@@ -4,12 +4,13 @@
 import { expose, transfer } from 'comlink';
 import opencascade from 'replicad-opencascadejs';
 import wasmUrl from 'replicad-opencascadejs/wasm?url';
-import { draw, drawCircle, drawRectangle, EdgeFinder, genericSweep, importSTEP, FaceFinder, measureArea, measureShapeVolumeProperties, measureVolume, Plane, setOC, type Drawing, type Shape3D } from 'replicad';
+import { DistanceQuery, makeVertex, draw, drawCircle, drawRectangle, EdgeFinder, genericSweep, importSTEP, FaceFinder, measureArea, measureShapeVolumeProperties, measureVolume, Plane, setOC, type Drawing, type Shape3D } from 'replicad';
 import type { EdgeRef, FeatureDraft, PartDocument, PatternAxis, SketchFeature } from '../model/types';
 import { isSeedType } from '../model/types';
-import { frameForSketch, planeById, planeFrame, add, dot, neg, scale, toWorld, sub, type Vec3 } from '../model/planes';
+import { frameForSketch, planeById, planeFrame, add, cross, dot, neg, scale, toWorld, sub, type Vec3 } from '../model/planes';
 import { edgeLabel, edgePoint, extrudeExtent, facePointWorld, faceFrame, faceLabel, getSketchFeature, pointOf, THROUGH_ALL, vertexDepth, vertexLabel } from '../model/refs';
 import { nestLoops, sketchLoops, sketchPath, type Loop } from './profile';
+import { axisLine, resolveAxis } from '../model/axes';
 
 export interface FeatureStatus {
   id: string;
@@ -29,6 +30,8 @@ export interface MeshData {
   edgeGroups: Uint32Array;
   /** per model face: first index into `triangles` and index count */
   faceGroups: Uint32Array;
+  /** per model face: id of the coloured feature whose solid it lies on ('' = none); only when a feature has a colour */
+  faceOwners?: string[];
 }
 export interface RebuildResult {
   ms: number;
@@ -179,11 +182,20 @@ function toolOf(doc: PartDocument, f: FeatureDraft): Tool {
     case 'revolve':
     case 'cutRevolve': {
       const sk = sketchOf(doc, f.sketchId);
-      const axis = sk.sketch.entities.find((e) => e.id === f.axisLineId);
-      if (!axis || axis.kind !== 'line') throw new Error('Pick a centerline in the sketch as the axis.');
       const frame = frameForSketch(doc, sk.id)!;
-      const p1 = toWorld(frame, pointOf(sk.sketch, axis.p1));
-      const p2 = toWorld(frame, pointOf(sk.sketch, axis.p2));
+      let p1: Vec3, p2: Vec3;
+      if (!f.axisId) {
+        const axis = sk.sketch.entities.find((e) => e.id === f.axisLineId);
+        if (!axis || axis.kind !== 'line') throw new Error('Pick a centerline in the sketch as the axis.');
+        p1 = toWorld(frame, pointOf(sk.sketch, axis.p1));
+        p2 = toWorld(frame, pointOf(sk.sketch, axis.p2));
+      } else {
+        const ax = axisLine(doc, f.axisId);
+        if (!ax) throw new Error('The reference axis no longer exists. Pick another axis.');
+        if (Math.abs(dot(ax.dir, frame.normal)) > 1e-6) throw new Error('The reference axis must lie in the sketch plane.');
+        p1 = ax.origin;
+        p2 = add(ax.origin, ax.dir);
+      }
       const angle = f.angle.value;
       if (!(angle > 0 && angle <= 360)) throw new Error('The angle must be between 0 and 360 degrees.');
       const solid = profileDrawing(sk)
@@ -262,6 +274,7 @@ function seedTools(doc: PartDocument, seeds: string[]): Tool[] {
 function apply(doc: PartDocument, body: Shape3D | null, f: FeatureDraft): Shape3D | null {
   switch (f.type) {
     case 'plane':
+    case 'axis':
       return body;
     case 'import': {
       const shape = imported.get(fnv(f.step).toString(36));
@@ -318,7 +331,14 @@ function apply(doc: PartDocument, body: Shape3D | null, f: FeatureDraft): Shape3
       const n = Math.round(f.count);
       if (!(n >= 2 && n <= 200)) throw new Error('The count must be between 2 and 200.');
       const tools = seedTools(doc, f.seeds);
-      const axis = AXES[f.axis];
+      let axis = AXES[f.axis];
+      let centre: Vec3 = [0, 0, 0];
+      if (f.axisId) {
+        const ax = axisLine(doc, f.axisId);
+        if (!ax) throw new Error('The reference axis no longer exists. Pick another axis.');
+        axis = ax.dir;
+        centre = ax.origin;
+      }
       const s = f.reverse ? -1 : 1;
       let out: Shape3D = body;
       for (let i = 1; i < n; i++) {
@@ -331,7 +351,7 @@ function apply(doc: PartDocument, body: Shape3D | null, f: FeatureDraft): Shape3
             const total = f.spacing.value;
             if (!(total > 0 && total <= 360)) throw new Error('The angle must be between 0 and 360 degrees.');
             const step = total >= 360 ? total / n : total / (n - 1);
-            copy = t.solid.clone().rotate(s * step * i, [0, 0, 0], axis) as Shape3D;
+            copy = t.solid.clone().rotate(s * step * i, centre, axis) as Shape3D;
           }
           out = combine(out, copy, t.cut, false);
         }
@@ -422,6 +442,9 @@ function replay(doc: PartDocument, extra?: FeatureDraft) {
       // nothing to build
     } else if (f.type === 'plane') {
       if (f.def.type === 'offset') status = planeFrame(doc, f) ? { id: f.id, status: 'ok' } : { id: f.id, status: 'error', message: 'The plane or face this plane is offset from no longer exists.' };
+    } else if (f.type === 'axis') {
+      const r = resolveAxis(doc, f.def);
+      status = 'error' in r ? { id: f.id, status: 'error', message: r.error } : { id: f.id, status: 'ok' };
     } else if (f.type === 'sketch') {
       status = frameForSketch(doc, f.id) ? { id: f.id, status: 'ok' } : { id: f.id, status: 'error', message: 'The face this sketch was on no longer exists.' };
     } else {
@@ -446,6 +469,51 @@ function replay(doc: PartDocument, extra?: FeatureDraft) {
   }
   trimCache(body);
   return { body, statuses, extraError };
+}
+
+/**
+ * Which coloured feature made each face: a point on the face (the centre of its
+ * biggest triangle) lying on the boundary of that feature's own solid. The
+ * latest feature wins, as later features cut into or build over earlier ones.
+ */
+function faceOwners(doc: PartDocument, mesh: MeshData): string[] | undefined {
+  const coloured = doc.features
+    .slice(0, doc.rollbackIndex)
+    .filter((f) => f.color && !f.suppressed && isSeedType(f.type))
+    .reverse();
+  if (!coloured.length) return undefined;
+  const v = mesh.vertices, t = mesh.triangles;
+  const P = (i: number): Vec3 => [v[i * 3], v[i * 3 + 1], v[i * 3 + 2]];
+  const samples: Vec3[] = [];
+  for (let k = 0; k < mesh.faceGroups.length; k += 2) {
+    const start = mesh.faceGroups[k], count = mesh.faceGroups[k + 1];
+    let best: Vec3 = [NaN, NaN, NaN], area = -1;
+    for (let j = start; j + 2 < start + count; j += 3) {
+      const a = P(t[j]), b = P(t[j + 1]), c = P(t[j + 2]);
+      const n = cross(sub(b, a), sub(c, a));
+      const ar = dot(n, n);
+      if (ar > area) (area = ar), (best = [(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3, (a[2] + b[2] + c[2]) / 3]);
+    }
+    samples.push(best);
+  }
+  const owners = samples.map(() => '');
+  for (const f of coloured) {
+    let tool: Shape3D;
+    try {
+      tool = toolOf(doc, f as FeatureDraft).solid;
+    } catch {
+      continue;
+    }
+    const queries = tool.faces.map((face) => new DistanceQuery(face));
+    samples.forEach((p, i) => {
+      if (owners[i] || Number.isNaN(p[0])) return;
+      const vx = makeVertex(p);
+      if (queries.some((q) => q.distanceTo(vx) < 0.06)) owners[i] = f.id;
+      vx.delete();
+    });
+    for (const q of queries) q.delete();
+  }
+  return owners;
 }
 
 function meshOf(body: Shape3D | null): MeshData | null {
@@ -483,6 +551,7 @@ const api = {
     const { body, statuses } = replay(doc);
     lastBody = body;
     const mesh = meshOf(body);
+    if (mesh) mesh.faceOwners = faceOwners(doc, mesh);
     const volume = body ? measureVolume(body) : 0;
     const res: RebuildResult = { ms: Math.round(performance.now() - t0), statuses, mesh, volume };
     return transfer(res, transferables(mesh));
