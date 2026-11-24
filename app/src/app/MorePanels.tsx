@@ -477,7 +477,7 @@ export function EquationsDialog() {
   );
 }
 
-const MATERIALS = [
+export const MATERIALS = [
   { id: 'steel', name: 'Steel', density: 7850 },
   { id: 'stainless', name: 'Stainless steel', density: 8000 },
   { id: 'aluminium', name: 'Aluminium', density: 2700 },

@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { Canvas, useThree, type ThreeEvent } from '@react-three/fiber';
-import { Html, Line, OrbitControls } from '@react-three/drei';
+import { GizmoHelper, GizmoViewcube, Grid, Html, Line, OrbitControls } from '@react-three/drei';
+import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js';
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import tokens from '../../../replica/design/tokens.json';
 import { useDoc, getSketch, consumedSketches, type PointPick } from '../store/docStore';
@@ -43,7 +46,10 @@ export function Viewport() {
           useView.getState().setPickedFace(null);
         }}
       >
-        <hemisphereLight args={['#ffffff', '#8a93a0', 1.4]} />
+        <hemisphereLight args={['#ffffff', '#7d8794', 1.1]} />
+        {/* a fixed key light from above-front and a soft fill from behind, so faces read apart */}
+        <directionalLight position={[0.6, -1, 1.4]} intensity={0.9} />
+        <directionalLight position={[-1, 1.2, -0.4]} intensity={0.35} />
         <CameraLight />
         <CameraRig />
         <OrbitControls
@@ -60,6 +66,19 @@ export function Viewport() {
         <Preview />
         <Sketches />
         <Triad />
+        <Floor />
+        {!inSketch && (
+          <GizmoHelper alignment="bottom-right" margin={[76, 76]}>
+            <GizmoViewcube
+              faces={['Right', 'Left', 'Back', 'Front', 'Top', 'Bottom']}
+              color={C['model-face']}
+              textColor={C.text}
+              strokeColor={C['border-input']}
+              hoverColor={C['accent-soft']}
+              opacity={1}
+            />
+          </GizmoHelper>
+        )}
         <MeasureOverlay />
         <HoleMarker />
       </Canvas>
@@ -73,7 +92,7 @@ function CameraLight() {
   const { camera, scene } = useThree();
   useEffect(() => {
     if (import.meta.env.DEV) (window as unknown as { __scene: THREE.Scene }).__scene = scene;
-    const light = new THREE.DirectionalLight('#ffffff', 1.6);
+    const light = new THREE.DirectionalLight('#ffffff', 1.1);
     light.position.set(1, 1, 2);
     camera.add(light);
     scene.add(camera);
@@ -122,6 +141,19 @@ function CameraRig() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [request]);
 
+  // The first solid (a new part, or a file opened): fit it in view, and put the
+  // reference planes away unless the user chose to show or hide them.
+  const empty = useKernel((k) => !k.mesh || !k.mesh.vertices.length);
+  const wasEmpty = useRef(empty);
+  useEffect(() => {
+    if (wasEmpty.current && !empty) {
+      if (useDoc.getState().mode.kind !== 'sketch') look([1, -1.3, 0.9]);
+      if (!useDoc.getState().planesTouched) useDoc.setState({ showPlanes: false });
+    }
+    wasEmpty.current = empty;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [empty]);
+
   // Starting a new solid feature turns the view to isometric so the result is visible.
   const t = mode.kind === 'feature' ? mode.draft.type : null;
   const featuring = mode.kind === 'feature' && !mode.editingId && (t === 'extrude' || t === 'cutExtrude' || t === 'revolve' || t === 'cutRevolve');
@@ -145,9 +177,98 @@ function CameraRig() {
   return null;
 }
 
+/* ---------- floor, shadow, edges ---------- */
+
+let shadowTex: THREE.Texture | null = null;
+/** How dark a soft shadow is across its patch: most in the middle, none at the edges. */
+function shadowTexture() {
+  if (shadowTex) return shadowTex;
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d')!;
+  const grad = g.createRadialGradient(64, 64, 8, 64, 64, 64);
+  // grey levels: used as an alpha map (white = full shadow, black = none)
+  grad.addColorStop(0, '#ffffff');
+  grad.addColorStop(0.55, '#808080');
+  grad.addColorStop(1, '#000000');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  shadowTex = new THREE.CanvasTexture(c);
+  return shadowTex;
+}
+
+/** A fading grid and a soft shadow just under the part (hidden while sketching). */
+function Floor() {
+  const mesh = useKernel((k) => k.mesh);
+  const sketching = useDoc((s) => s.mode.kind === 'sketch');
+  const box = useMemo(() => (mesh && mesh.vertices.length ? new THREE.Box3().setFromArray(mesh.vertices) : null), [mesh]);
+  if (sketching) return null;
+  const z = box ? box.min.z : 0;
+  const cx = box ? (box.min.x + box.max.x) / 2 : 0;
+  const cy = box ? (box.min.y + box.max.y) / 2 : 0;
+  const size = box ? Math.max(box.max.x - box.min.x, box.max.y - box.min.y, 20) : 100;
+  const height = box ? Math.max(box.max.z - box.min.z, 1) : 1;
+  const cell = size > 400 ? 50 : size > 80 ? 10 : size > 20 ? 5 : 1;
+  return (
+    <>
+      {/* drei's grid and shadow lie in x-z; turn them into this z-up world's x-y */}
+      <group position={[0, 0, z - 0.05]} rotation={[Math.PI / 2, 0, 0]}>
+        <Grid
+          infiniteGrid
+          cellSize={cell}
+          sectionSize={cell * 5}
+          cellThickness={0.6}
+          sectionThickness={1}
+          cellColor={C['grid-cell']}
+          sectionColor={C['grid-section']}
+          fadeDistance={size * 6 + 200}
+          fadeStrength={2}
+          side={THREE.DoubleSide}
+          raycast={() => null}
+        />
+      </group>
+      {box && (
+        <mesh position={[cx, cy, z - 0.02]} raycast={() => null} renderOrder={-1}>
+          <planeGeometry args={[(box.max.x - box.min.x) * 1.25 + height * 0.8, (box.max.y - box.min.y) * 1.25 + height * 0.8]} />
+          <meshBasicMaterial color={C['model-edge']} alphaMap={shadowTexture()} transparent depthWrite={false} opacity={0.3} />
+        </mesh>
+      )}
+    </>
+  );
+}
+
+/** The part's edges as screen-width lines (plain WebGL lines are always 1 px and look thin). */
+function FatEdges({ edges, color, clip }: { edges: Float32Array; color: string; clip: THREE.Plane[] }) {
+  const size = useThree((s) => s.size);
+  const line = useMemo(() => {
+    const g = new LineSegmentsGeometry();
+    g.setPositions(edges);
+    const m = new LineMaterial({ color, linewidth: 1.4, worldUnits: false });
+    const l = new LineSegments2(g, m);
+    l.raycast = () => {};
+    return l;
+  }, [edges, color]);
+  useEffect(() => {
+    line.material.resolution.set(size.width, size.height);
+    line.material.clippingPlanes = clip;
+    line.material.needsUpdate = true;
+  }, [line, size, clip]);
+  useEffect(() => () => (line.geometry.dispose(), line.material.dispose()), [line]);
+  return <primitive object={line} />;
+}
+
 /* ---------- planes ---------- */
 
-const PLANE_HALF = 60;
+/** Half the size of a reference plane: a little bigger than the part, 60 mm with no part. */
+function usePlaneHalf() {
+  const mesh = useKernel((k) => k.mesh);
+  return useMemo(() => {
+    if (!mesh || !mesh.vertices.length) return 60;
+    let m = 0;
+    for (const v of mesh.vertices) m = Math.max(m, Math.abs(v));
+    return Math.max(20, m * 1.15);
+  }, [mesh]);
+}
 
 /** True when the pointer ray also hits the solid (behind or in front of a plane). */
 const solidBehind = (e: ThreeEvent<PointerEvent | MouseEvent>) => e.intersections.some((i) => i.object.userData.solid);
@@ -202,19 +323,21 @@ function HelixView({ helix, color }: { helix: Parameters<typeof helixGeom>[1]; c
 /** A reference axis: a long dash-dot line through the model. */
 function AxisLineView({ def, color }: { def: AxisDef; color: string }) {
   const doc = useDoc((s) => s.doc);
+  const half = usePlaneHalf();
   const r = resolveAxis(doc, def);
   if ('error' in r) return null;
-  const L = PLANE_HALF * 1.4;
+  const L = half * 1.4;
   const pts: Vec3[] = [add(r.origin, scale(r.dir, -L)), add(r.origin, scale(r.dir, L))];
   return <Line points={pts} color={color} lineWidth={1.5} dashed dashSize={4} gapSize={1.5} depthTest={false} renderOrder={11} />;
 }
 
 function PlaneQuad({ doc, plane, selected, active, interactive, preview }: { doc: PartDocument; plane: PlaneFeature; selected: boolean; active: boolean; interactive: boolean; preview?: boolean }) {
   const [hover, setHover] = useState(false);
+  const half = usePlaneHalf();
   const f = planeFrame(doc, plane);
   const corners = useMemo(
-    () => (f ? [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([x, y]) => toWorld(f, { x: x * PLANE_HALF, y: y * PLANE_HALF })) : []),
-    [f],
+    () => (f ? [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([x, y]) => toWorld(f, { x: x * half, y: y * half })) : []),
+    [f, half],
   );
   const geom = useMemo(() => {
     const g = new THREE.BufferGeometry();
@@ -244,9 +367,9 @@ function PlaneQuad({ doc, plane, selected, active, interactive, preview }: { doc
           useDoc.getState().beginSketch(plane.id);
         }}
       >
-        <meshBasicMaterial color={color} transparent opacity={active ? 0.06 : selected || hover ? 0.22 : 0.1} side={THREE.DoubleSide} depthWrite={false} />
+        <meshBasicMaterial color={color} transparent opacity={active ? 0.05 : selected || hover ? 0.2 : 0.06} side={THREE.DoubleSide} depthWrite={false} />
       </mesh>
-      <Line points={[...corners, corners[0]]} color={color} lineWidth={selected || hover ? 2 : 1} transparent opacity={0.8} />
+      <Line points={[...corners, corners[0]]} color={color} lineWidth={selected || hover ? 2 : 1} transparent opacity={selected || hover ? 0.9 : 0.45} />
     </group>
   );
 }
@@ -537,11 +660,7 @@ function Body() {
           side={clip.length ? THREE.DoubleSide : THREE.FrontSide}
         />
       </mesh>
-      {style !== 'shaded' && (
-        <lineSegments geometry={g.edges} raycast={() => null}>
-          <lineBasicMaterial color={dim ? C['border-input'] : C['model-edge']} clippingPlanes={clip} />
-        </lineSegments>
-      )}
+      {style !== 'shaded' && mesh && <FatEdges edges={mesh.edges} color={dim ? C['border-input'] : C['model-edge']} clip={clip} />}
       {faceGeo && (
         <mesh geometry={faceGeo} raycast={() => null} renderOrder={3}>
           <meshBasicMaterial color={hoverFace ? C.hover : C.selected} transparent opacity={0.35} depthWrite={false} side={THREE.DoubleSide} />

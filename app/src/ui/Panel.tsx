@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { AlertTriangle, Check, ChevronDown, Info, X, XCircle } from 'lucide-react';
-import { IconButton } from './Button';
+import { Button, IconButton } from './Button';
 import { NumberField } from './Fields';
 import { cn } from './cn';
 
@@ -28,21 +28,23 @@ export function FeaturePanel({
         if (e.key === 'Escape') onCancel?.();
         if (e.key === 'Enter' && canConfirm && (e.target as HTMLElement).tagName !== 'BUTTON') onConfirm?.();
       }}
-      className="flex flex-col bg-surface-raised border border-border rounded-md overflow-hidden"
+      className="flex flex-col h-full min-h-0 bg-surface-raised"
     >
-      <header className="flex items-center gap-3 h-18 px-4 border-b border-border">
-        <span className="text-accent" aria-hidden>
+      <header className="flex items-center gap-3 h-20 px-6 border-b border-border shrink-0">
+        <span className="flex items-center justify-center size-12 rounded-md bg-accent-soft text-accent" aria-hidden>
           {icon}
         </span>
-        <h2 className="flex-1 text-base font-semibold">{title}</h2>
-        <IconButton label="Confirm" tone="accent" disabled={!canConfirm} onClick={onConfirm}>
-          <Check size={18} />
-        </IconButton>
-        <IconButton label="Cancel" tone="danger" onClick={onCancel}>
-          <X size={18} />
-        </IconButton>
+        <h2 className="flex-1 text-base font-semibold truncate">{title}</h2>
       </header>
-      <div className="overflow-auto">{children}</div>
+      <div className="flex-1 min-h-0 overflow-auto">{children}</div>
+      <footer className="flex gap-3 p-4 border-t border-border bg-surface shrink-0">
+        <Button variant="primary" className="flex-1" aria-label="Confirm" title="Confirm (Enter)" disabled={!canConfirm} onClick={onConfirm} icon={<Check size={16} aria-hidden />}>
+          OK
+        </Button>
+        <Button variant="secondary" className="flex-1" aria-label="Cancel" title="Cancel (Esc)" onClick={onCancel} icon={<X size={16} aria-hidden />}>
+          Cancel
+        </Button>
+      </footer>
     </section>
   );
 }

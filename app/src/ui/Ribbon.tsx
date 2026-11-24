@@ -21,7 +21,7 @@ export function Ribbon({ label, children }: { label: string; children: ReactNode
       role="toolbar"
       aria-label={label}
       onKeyDown={onKey}
-      className="flex items-stretch gap-1 h-32 px-4 py-2 bg-surface-raised border-b border-border"
+      className="flex items-stretch gap-1 h-44 px-4 pt-2 bg-surface-raised border-b border-border overflow-x-auto overflow-y-hidden"
     >
       {children}
     </div>
@@ -32,6 +32,23 @@ export function RibbonDivider() {
   return <div role="separator" aria-orientation="vertical" className="w-px my-4 mx-2 bg-border" />;
 }
 
+/** A labelled set of related commands, the label underneath (like a desktop CAD ribbon). */
+export function RibbonGroup({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div role="group" aria-label={label} className="flex flex-col shrink-0 px-2 border-r border-border last:border-r-0">
+      <div className="flex items-start gap-1 flex-1">{children}</div>
+      <div className="text-2xs text-text-muted text-center leading-none pb-2 pt-1 select-none" aria-hidden>
+        {label}
+      </div>
+    </div>
+  );
+}
+
+/** Small commands stacked in a column, two or three high. */
+export function RibbonStack({ children }: { children: ReactNode }) {
+  return <div className="flex flex-col justify-start">{children}</div>;
+}
+
 interface RibbonButtonProps {
   icon: ReactNode;
   label: string;
@@ -39,13 +56,16 @@ interface RibbonButtonProps {
   active?: boolean;
   disabled?: boolean;
   layout?: 'large' | 'small';
+  /** a shorter label to show; `label` stays the button's name */
+  short?: string;
   onClick?: () => void;
 }
 
-export function RibbonButton({ icon, label, shortcut, active, disabled, layout = 'large', onClick }: RibbonButtonProps) {
+export function RibbonButton({ icon, label, shortcut, active, disabled, layout = 'large', short, onClick }: RibbonButtonProps) {
   return (
     <button
       onClick={onClick}
+      aria-label={short ? label : undefined}
       disabled={disabled}
       aria-pressed={active}
       title={shortcut ? `${label} (${shortcut})` : label}
@@ -55,13 +75,13 @@ export function RibbonButton({ icon, label, shortcut, active, disabled, layout =
         active ? 'bg-accent-soft border-accent' : 'border-transparent hover:bg-surface-sunken',
         layout === 'large'
           ? 'flex flex-col items-center justify-center gap-1 w-28 h-28 px-1'
-          : 'flex items-center gap-2 h-12 px-3',
+          : 'flex items-center gap-2 h-10 pl-2 pr-3 whitespace-nowrap',
       )}
     >
       <span className={cn('text-text', active && 'text-accent')} aria-hidden>
         {icon}
       </span>
-      <span className="leading-tight text-center">{label}</span>
+      <span className={cn('leading-tight', layout === 'large' ? 'text-center' : 'text-left')}>{short ?? label}</span>
     </button>
   );
 }

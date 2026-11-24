@@ -39,6 +39,8 @@ interface State {
   solve: SolveResult | null;
   editingDimId: Id | null;
   showPlanes: boolean;
+  /** the user showed or hid the planes themself (so they are not hidden for them) */
+  planesTouched: boolean;
   message: { tone: 'info' | 'success' | 'error'; text: string; n: number } | null;
 
   newDoc(units?: Units): void;
@@ -319,9 +321,10 @@ export const useDoc = create<State>((set, get) => {
     solve: null,
     editingDimId: null,
     showPlanes: true,
+    planesTouched: false,
     message: null,
 
-    newDoc: (units) => set({ doc: { ...makeDoc(units), color: useSettings.getState().defaultColor }, showPlanes: useSettings.getState().showPlanes, past: [], future: [], dirty: false, selection: null, mode: { kind: 'model' }, solve: null }),
+    newDoc: (units) => set({ doc: { ...makeDoc(units), color: useSettings.getState().defaultColor }, showPlanes: useSettings.getState().showPlanes, planesTouched: false, past: [], future: [], dirty: false, selection: null, mode: { kind: 'model' }, solve: null }),
     loadDoc: (doc) => set({ doc, past: [], future: [], dirty: false, selection: null, mode: { kind: 'model' }, solve: null }),
 
     undo: () => {
@@ -339,7 +342,7 @@ export const useDoc = create<State>((set, get) => {
     },
 
     select: (id) => set({ selection: id }),
-    togglePlanes: () => set({ showPlanes: !get().showPlanes }),
+    togglePlanes: () => set({ showPlanes: !get().showPlanes, planesTouched: true }),
     notify: (tone, text) => set({ message: { tone, text, n: (get().message?.n ?? 0) + 1 } }),
 
     renameFeature: (id, name) => {

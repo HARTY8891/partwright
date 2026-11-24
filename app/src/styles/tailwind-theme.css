@@ -32,6 +32,8 @@
   --color-sketch-construction: var(--pw-color-sketch-construction);
   --color-dimension: var(--pw-color-dimension);
   --color-plane-fill: var(--pw-color-plane-fill);
+  --color-grid-cell: var(--pw-color-grid-cell);
+  --color-grid-section: var(--pw-color-grid-section);
   --color-axis-x: var(--pw-color-axis-x);
   --color-axis-y: var(--pw-color-axis-y);
   --color-axis-z: var(--pw-color-axis-z);

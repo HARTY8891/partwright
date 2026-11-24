@@ -4,7 +4,7 @@ import {
   Axis3D, Box, Circle, CircleDot, Eye, EyeOff, Hexagon, Layers, Maximize, Minus, MousePointer2, PenLine,
   RectangleHorizontal, Redo2, Rotate3D, Ruler, Scale3D, Scissors, Square, Trash2, Undo2, Pencil, Loader2,
   Spline, SquareDashed, Cylinder, MoveDiagonal, CircleDashed, PackageOpen, Columns3, RotateCw, FlipHorizontal2,
-  Layers2, Slash, TriangleRight, Cable, Dot, Type, Sunrise, ScrollText, SplitSquareHorizontal, Grid3x3, SquareDashedBottom, Pentagon, RectangleEllipsis, Variable as VariableIcon, SquareSplitHorizontal, Waves, ScissorsLineDashed, ArrowRightToLine, FileInput, Blend, Route,
+  Layers2, Slash, TriangleRight, Cable, Dot, Type, ChevronDown, BoxSelect, Sunrise, ScrollText, SplitSquareHorizontal, Grid3x3, SquareDashedBottom, Pentagon, RectangleEllipsis, Variable as VariableIcon, SquareSplitHorizontal, Waves, ScissorsLineDashed, ArrowRightToLine, FileInput, Blend, Route,
 } from 'lucide-react';
 import { useDoc, consumedSketches, getSketch, type Tool } from '../store/docStore';
 import { exportFile, startKernelSync, useKernel } from '../store/rebuild';
@@ -15,13 +15,13 @@ import { IMPORT_ACCEPT, prepareImport } from '../model/importFormats';
 import { StartDialog, ErrorsDialog, VersionsDialog, useDialogs, useStartOnLaunch } from './Dialogs';
 import { RelationsPanel } from './RelationsPanel';
 import { CommandPalette, usePalette } from './CommandPalette';
-import { referenceAxes } from './MorePanels';
+import { MATERIALS, referenceAxes } from './MorePanels';
 import { ConfigPicker, ConfigurationsDialog, EquationsDialog, MassDialog, MeasurePanel, MoreFeatureOptions, OptionsDialog, PolygonOptions, SecondDirection, SectionPanel, ThinWall, DraftOption, FaceColour, needsPick, useToolDialogs } from './MorePanels';
 import { RollbackBar } from '../ui/Tree';
 import { docVars } from '../model/equations';
 import { Viewport } from '../viewport/Viewport';
 import { useView, type DisplayStyle } from '../viewport/viewStore';
-import { Ribbon, RibbonButton, RibbonDivider, RibbonTabPanel, RibbonTabs } from '../ui/Ribbon';
+import { Ribbon, RibbonButton, RibbonGroup, RibbonStack, RibbonTabPanel, RibbonTabs } from '../ui/Ribbon';
 import { Tree, TreeItem } from '../ui/Tree';
 import { IconButton } from '../ui/Button';
 import { ConfirmCorner, FeaturePanel, MessageBanner, PanelSection } from '../ui/Panel';
@@ -80,6 +80,7 @@ function Shell() {
               <PolygonOptions />
               <RelationsPanel />
               <FeatureTree />
+              <PartSummary />
             </>
           )}
         </aside>
@@ -90,7 +91,6 @@ function Shell() {
             {mode.kind === 'sketch' && (
               <ConfirmCorner mode="sketch" onConfirm={() => useDoc.getState().endSketch()} onCancel={() => useDoc.getState().cancelSketch()} />
             )}
-            {mode.kind === 'feature' && <FeatureCorner />}
           </div>
           {loading && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
@@ -263,82 +263,123 @@ function CommandRibbon() {
     else s.notify('info', 'Select a plane or a flat face, then choose Sketch. (Double-clicking a plane or face also works.)');
   };
   const tool = mode.kind === 'sketch' ? mode.tool : null;
-  const toolBtn = (t: Tool, icon: ReactNode, label: string, key: string) => (
-    <RibbonButton icon={icon} label={label} shortcut={key} active={tool === t} disabled={mode.kind !== 'sketch'} onClick={() => s.setTool(t)} />
+  type Icon = typeof Box;
+  const ic = (I: Icon, small?: boolean) => <I size={small ? 16 : 24} />;
+  const toolBtn = (t: Tool, I: Icon, label: string, key: string, small?: boolean) => (
+    <RibbonButton icon={ic(I, small)} label={label} layout={small ? 'small' : 'large'} shortcut={key} active={tool === t} disabled={mode.kind !== 'sketch'} onClick={() => s.setTool(t)} />
   );
   const measuring = useView((v) => v.measuring);
-  const feat = (t: FeatureDraft['type'], icon: ReactNode, label: string, key?: string) => (
-    <RibbonButton icon={icon} label={label} shortcut={key} active={mode.kind === 'feature' && mode.draft.type === t} onClick={() => s.beginFeature(t)} />
+  const feat = (t: FeatureDraft['type'], I: Icon, label: string, opts: { key?: string; small?: boolean; short?: string } = {}) => (
+    <RibbonButton
+      icon={ic(I, opts.small)}
+      label={label}
+      short={opts.short}
+      layout={opts.small ? 'small' : 'large'}
+      shortcut={opts.key}
+      active={mode.kind === 'feature' && mode.draft.type === t}
+      onClick={() => s.beginFeature(t)}
+    />
   );
   return (
     <RibbonTabs tabs={['Features', 'Sketch', 'Evaluate']} value={tab} onValueChange={setTab}>
       <RibbonTabPanel value="Features">
         <Ribbon label="Feature commands">
-          <RibbonButton icon={<PenLine size={24} />} label="Sketch" shortcut="S" disabled={mode.kind !== 'model'} onClick={startSketch} />
-          <RibbonDivider />
-          {feat('extrude', <Box size={24} />, 'Extrude', 'E')}
-          {feat('revolve', <Rotate3D size={24} />, 'Revolve')}
-          {feat('loft', <Blend size={24} />, 'Loft')}
-          {feat('sweep', <Route size={24} />, 'Sweep')}
-          {feat('rib', <TriangleRight size={24} />, 'Rib')}
-          {feat('helix', <Cable size={24} />, 'Helix')}
-          {feat('dome', <Sunrise size={24} />, 'Dome')}
-          {feat('wrap', <ScrollText size={24} />, 'Wrap')}
-          {feat('splitLine', <SplitSquareHorizontal size={24} />, 'Split line')}
-          <RibbonDivider />
-          {feat('cutExtrude', <Scissors size={24} />, 'Cut', 'X')}
-          {feat('cutRevolve', <Cylinder size={24} />, 'Cut revolve')}
-          <RibbonDivider />
-          {feat('fillet', <CircleDot size={24} />, 'Fillet')}
-          {feat('chamfer', <Hexagon size={24} />, 'Chamfer')}
-          {feat('shell', <PackageOpen size={24} />, 'Shell')}
-          {feat('hole', <CircleDashed size={24} />, 'Hole', 'H')}
-          <RibbonDivider />
-          {feat('linearPattern', <Columns3 size={24} />, 'Linear pattern')}
-          {feat('circularPattern', <RotateCw size={24} />, 'Circular pattern')}
-          {feat('mirror', <FlipHorizontal2 size={24} />, 'Mirror')}
-          {feat('sketchPattern', <Grid3x3 size={24} />, 'Sketch pattern')}
-          <RibbonDivider />
-          {feat('plane', <Layers2 size={24} />, 'Plane')}
-          {feat('axis', <Slash size={24} />, 'Axis')}
+          <RibbonGroup label="Sketch">
+            <RibbonButton icon={<PenLine size={24} />} label="Sketch" shortcut="S" disabled={mode.kind !== 'model'} onClick={startSketch} />
+          </RibbonGroup>
+          <RibbonGroup label="Add">
+            {feat('extrude', Box, 'Extrude', { key: 'E' })}
+            {feat('revolve', Rotate3D, 'Revolve')}
+            <RibbonStack>
+              {feat('loft', Blend, 'Loft', { small: true })}
+              {feat('sweep', Route, 'Sweep', { small: true })}
+              {feat('rib', TriangleRight, 'Rib', { small: true })}
+            </RibbonStack>
+          </RibbonGroup>
+          <RibbonGroup label="Remove">
+            {feat('cutExtrude', Scissors, 'Cut', { key: 'X' })}
+            {feat('hole', CircleDashed, 'Hole', { key: 'H' })}
+            <RibbonStack>
+              {feat('cutRevolve', Cylinder, 'Cut revolve', { small: true, short: 'Revolve cut' })}
+              {feat('shell', PackageOpen, 'Shell', { small: true })}
+            </RibbonStack>
+          </RibbonGroup>
+          <RibbonGroup label="Edges and faces">
+            {feat('fillet', CircleDot, 'Fillet')}
+            <RibbonStack>
+              {feat('chamfer', Hexagon, 'Chamfer', { small: true })}
+              {feat('dome', Sunrise, 'Dome', { small: true })}
+              {feat('wrap', ScrollText, 'Wrap', { small: true })}
+            </RibbonStack>
+          </RibbonGroup>
+          <RibbonGroup label="Pattern">
+            {feat('linearPattern', Columns3, 'Linear pattern', { short: 'Linear' })}
+            <RibbonStack>
+              {feat('circularPattern', RotateCw, 'Circular pattern', { small: true, short: 'Circular' })}
+              {feat('mirror', FlipHorizontal2, 'Mirror', { small: true })}
+              {feat('sketchPattern', Grid3x3, 'Sketch pattern', { small: true, short: 'On points' })}
+            </RibbonStack>
+          </RibbonGroup>
+          <RibbonGroup label="Reference">
+            <RibbonStack>
+              {feat('plane', Layers2, 'Plane', { small: true })}
+              {feat('axis', Slash, 'Axis', { small: true })}
+            </RibbonStack>
+            <RibbonStack>
+              {feat('helix', Cable, 'Helix', { small: true })}
+              {feat('splitLine', SplitSquareHorizontal, 'Split line', { small: true })}
+            </RibbonStack>
+          </RibbonGroup>
         </Ribbon>
       </RibbonTabPanel>
       <RibbonTabPanel value="Sketch">
         <Ribbon label="Sketch tools">
-          {mode.kind !== 'sketch' ? (
-            <RibbonButton icon={<PenLine size={24} />} label="Sketch" disabled={mode.kind !== 'model'} onClick={startSketch} />
-          ) : (
-            <RibbonButton icon={<PenLine size={24} />} label="Finish sketch" active onClick={() => s.endSketch()} />
-          )}
-          <RibbonDivider />
-          {toolBtn('select', <MousePointer2 size={24} />, 'Select', 'Esc')}
-          {toolBtn('point', <Dot size={24} />, 'Point', 'O')}
-          {toolBtn('line', <Minus size={24} />, 'Line', 'L')}
-          {toolBtn('centerline', <MoveDiagonal size={24} />, 'Centerline', 'K')}
-          {toolBtn('rect', <RectangleHorizontal size={24} />, 'Rectangle', 'R')}
-          {toolBtn('circle', <Circle size={24} />, 'Circle', 'C')}
-          {toolBtn('arc', <Spline size={24} />, 'Arc', 'A')}
-          {toolBtn('polygon', <Pentagon size={24} />, 'Polygon', 'P')}
-          {toolBtn('slot', <RectangleEllipsis size={24} />, 'Slot', 'T')}
-          {toolBtn('spline', <Waves size={24} />, 'Spline', 'N')}
-          {toolBtn('text', <Type size={24} />, 'Text', 'X')}
-          <RibbonDivider />
-          {toolBtn('trim', <ScissorsLineDashed size={24} />, 'Trim', 'Y')}
-          {toolBtn('extend', <ArrowRightToLine size={24} />, 'Extend', 'W')}
-          <RibbonButton icon={<SquareDashedBottom size={24} />} label="Convert edges" disabled={mode.kind !== 'sketch'} onClick={() => void s.convertEdges()} />
-          <RibbonDivider />
-          {toolBtn('dimension', <Ruler size={24} />, 'Dimension', 'D')}
-          <RibbonButton
-            icon={<SquareDashed size={24} />}
-            label="Construction"
-            shortcut="G"
-            disabled={mode.kind !== 'sketch' || !sketchSel.length}
-            onClick={() => sketchSel.forEach((id) => s.toggleConstruction(id))}
-          />
-          <RibbonDivider />
-          <RibbonButton icon={<Box size={24} />} label="Extrude" disabled={mode.kind !== 'sketch'} onClick={() => s.beginFeature('extrude')} />
-          <RibbonButton icon={<Scissors size={24} />} label="Cut" disabled={mode.kind !== 'sketch'} onClick={() => s.beginFeature('cutExtrude')} />
-          <RibbonButton icon={<Rotate3D size={24} />} label="Revolve" disabled={mode.kind !== 'sketch'} onClick={() => s.beginFeature('revolve')} />
+          <RibbonGroup label="Sketch">
+            {mode.kind !== 'sketch' ? (
+              <RibbonButton icon={<PenLine size={24} />} label="Sketch" disabled={mode.kind !== 'model'} onClick={startSketch} />
+            ) : (
+              <RibbonButton icon={<PenLine size={24} />} label="Finish sketch" short="Finish" active onClick={() => s.endSketch()} />
+            )}
+            {toolBtn('select', MousePointer2, 'Select', 'Esc')}
+          </RibbonGroup>
+          <RibbonGroup label="Draw">
+            {toolBtn('line', Minus, 'Line', 'L')}
+            {toolBtn('rect', RectangleHorizontal, 'Rectangle', 'R')}
+            {toolBtn('circle', Circle, 'Circle', 'C')}
+            <RibbonStack>
+              {toolBtn('arc', Spline, 'Arc', 'A', true)}
+              {toolBtn('centerline', MoveDiagonal, 'Centerline', 'K', true)}
+              {toolBtn('point', Dot, 'Point', 'O', true)}
+            </RibbonStack>
+            <RibbonStack>
+              {toolBtn('polygon', Pentagon, 'Polygon', 'P', true)}
+              {toolBtn('slot', RectangleEllipsis, 'Slot', 'T', true)}
+              {toolBtn('spline', Waves, 'Spline', 'N', true)}
+            </RibbonStack>
+            {toolBtn('text', Type, 'Text', 'X')}
+          </RibbonGroup>
+          <RibbonGroup label="Modify">
+            <RibbonStack>
+              {toolBtn('trim', ScissorsLineDashed, 'Trim', 'Y', true)}
+              {toolBtn('extend', ArrowRightToLine, 'Extend', 'W', true)}
+              <RibbonButton icon={<SquareDashedBottom size={16} />} layout="small" label="Convert edges" disabled={mode.kind !== 'sketch'} onClick={() => void s.convertEdges()} />
+            </RibbonStack>
+          </RibbonGroup>
+          <RibbonGroup label="Size and relations">
+            {toolBtn('dimension', Ruler, 'Dimension', 'D')}
+            <RibbonButton
+              icon={<SquareDashed size={24} />}
+              label="Construction"
+              shortcut="G"
+              disabled={mode.kind !== 'sketch' || !sketchSel.length}
+              onClick={() => sketchSel.forEach((id) => s.toggleConstruction(id))}
+            />
+          </RibbonGroup>
+          <RibbonGroup label="Make a feature">
+            <RibbonButton icon={<Box size={24} />} label="Extrude" disabled={mode.kind !== 'sketch'} onClick={() => s.beginFeature('extrude')} />
+            <RibbonButton icon={<Scissors size={24} />} label="Cut" disabled={mode.kind !== 'sketch'} onClick={() => s.beginFeature('cutExtrude')} />
+            <RibbonButton icon={<Rotate3D size={24} />} label="Revolve" disabled={mode.kind !== 'sketch'} onClick={() => s.beginFeature('revolve')} />
+          </RibbonGroup>
         </Ribbon>
       </RibbonTabPanel>
       <RibbonTabPanel value="Evaluate">
@@ -530,7 +571,7 @@ function FeatureOptions() {
             ? 'The yellow curve shows the helix. Use it as the path of a sweep.'
         : 'The yellow shape shows the result.');
   return (
-    <div className="p-4">
+    <div className="flex-1 min-h-0 flex flex-col">
       <FeaturePanel
         icon={draft.type === 'plane' ? <Layers2 size={18} /> : ICONS[draft.type]}
         title={editing ? `Edit ${editing}` : TITLES[draft.type]}
@@ -660,27 +701,59 @@ function FeatureOptions() {
   );
 }
 
-function FeatureCorner() {
-  const previewError = useKernel((s) => s.previewError);
-  const mode = useDoc((s) => s.mode);
-  const empty = mode.kind === 'feature' && !!needsPick(mode.draft);
-  const s = useDoc.getState();
-  return <ConfirmCorner mode="feature" canConfirm={!previewError && !empty} onConfirm={s.confirmFeature} onCancel={s.cancelFeature} />;
-}
 
 /* ---------- view toolbar ---------- */
+
+/** view toolbar buttons: dark icons (the default icon colour is too pale over the 3D view) */
+const VB = 'text-text';
+const MENU_TRIGGER = 'h-14 px-2 inline-flex items-center justify-center gap-0.5 rounded-md hover:bg-surface-sunken';
+const STYLE_NAMES: Record<DisplayStyle, string> = { shadedEdges: 'shaded with edges', shaded: 'shaded', wireframe: 'wireframe' };
+
+/* ---------- part summary (under the tree) ---------- */
+
+function PartSummary() {
+  const doc = useDoc((s) => s.doc);
+  const volume = useKernel((s) => s.volume);
+  const mat = MATERIALS.find((m) => m.id === (doc.material ?? 'steel'))!;
+  const k = doc.units === 'in' ? 25.4 : 1;
+  const grams = volume * mat.density * 1e-6;
+  const solids = doc.features.slice(0, doc.rollbackIndex).filter((f) => f.type !== 'plane' && f.type !== 'sketch' && !f.suppressed).length;
+  const row = (label: string, value: string) => (
+    <div className="flex justify-between gap-4">
+      <dt className="text-text-muted">{label}</dt>
+      <dd className="font-mono tabular-nums text-right truncate">{value}</dd>
+    </div>
+  );
+  return (
+    <section aria-label="Part summary" className="m-4 mt-2 p-4 rounded-md bg-surface text-xs">
+      <dl className="flex flex-col gap-1.5">
+        {row('Material', mat.name)}
+        {row('Mass', volume > 0 ? (grams >= 1000 ? `${(grams / 1000).toFixed(3)} kg` : `${grams.toFixed(1)} g`) : '—')}
+        {row('Volume', volume > 0 ? (doc.units === 'in' ? `${(volume / k ** 3).toFixed(3)} in³` : `${(volume / 1000).toFixed(2)} cm³`) : '—')}
+        {row('Units', doc.units === 'in' ? 'inches' : 'millimetres')}
+        {row('Features', String(solids))}
+      </dl>
+      <button className="mt-3 text-xs text-accent hover:underline" onClick={() => useToolDialogs.getState().set({ mass: true })}>
+        Change material…
+      </button>
+    </section>
+  );
+}
 
 function ViewToolbar() {
   const showPlanes = useDoc((s) => s.showPlanes);
   const style = useView((s) => s.displayStyle);
   const section = useView((s) => s.section.on);
   const go = useView((s) => s.go);
+  const canUndo = useDoc((s) => s.past.length > 0);
+  const canRedo = useDoc((s) => s.future.length > 0);
   return (
-    <div role="toolbar" aria-label="View" className="absolute top-4 left-1/2 -translate-x-1/2 flex gap-1 p-1 rounded-lg bg-surface-raised/90 shadow-card">
-      <IconButton size="sm" label="Zoom to fit (F)" onClick={() => go('fit')}><Maximize size={14} /></IconButton>
+    <div role="toolbar" aria-label="View" className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center gap-1 p-1.5 rounded-lg bg-surface-raised border border-border shadow-card">
+      <IconButton label="Zoom to fit (F)" className={VB} onClick={() => go('fit')}><Maximize size={18} /></IconButton>
       <Menu.Root>
-        <Menu.Trigger aria-label="Standard views" className="size-12 inline-flex items-center justify-center rounded-md text-text-muted hover:bg-surface-sunken">
-          <Box size={14} />
+        <Menu.Trigger aria-label="Standard views" title="Standard views" className={cn(VB, MENU_TRIGGER)}>
+          <Box size={18} />
+          <ChevronDown size={12} className="-ml-0.5" aria-hidden />
         </Menu.Trigger>
         <Menu.Portal>
           <Menu.Content sideOffset={4} className="rounded-md bg-surface-raised border border-border shadow-pop p-2 text-sm z-50">
@@ -690,12 +763,14 @@ function ViewToolbar() {
           </Menu.Content>
         </Menu.Portal>
       </Menu.Root>
-      <IconButton size="sm" label={showPlanes ? 'Hide planes' : 'Show planes'} pressed={showPlanes} onClick={() => useDoc.getState().togglePlanes()}>
-        <Layers size={14} />
+      <span className="w-px h-10 mx-1 bg-border" aria-hidden />
+      <IconButton label={showPlanes ? 'Hide planes' : 'Show planes'} className={showPlanes ? undefined : VB} pressed={showPlanes} onClick={() => useDoc.getState().togglePlanes()}>
+        <Layers size={18} />
       </IconButton>
       <Menu.Root>
-        <Menu.Trigger aria-label="Display style" className="size-12 inline-flex items-center justify-center rounded-md text-text-muted hover:bg-surface-sunken">
-          <Eye size={14} />
+        <Menu.Trigger aria-label="Display style" title={`Display style: ${STYLE_NAMES[style]}`} className={cn(VB, MENU_TRIGGER)}>
+          {style === 'wireframe' ? <BoxSelect size={18} /> : style === 'shaded' ? <Square size={18} className="fill-current opacity-60" /> : <Eye size={18} />}
+          <ChevronDown size={12} className="-ml-0.5" aria-hidden />
         </Menu.Trigger>
         <Menu.Portal>
           <Menu.Content sideOffset={4} className="rounded-md bg-surface-raised border border-border shadow-pop p-2 text-sm z-50">
@@ -710,11 +785,12 @@ function ViewToolbar() {
           </Menu.Content>
         </Menu.Portal>
       </Menu.Root>
-      <IconButton size="sm" label="Section view" pressed={section} onClick={() => useView.getState().setSection({ on: !section })}>
-        <SquareSplitHorizontal size={14} />
+      <IconButton label="Section view" className={section ? undefined : VB} pressed={section} onClick={() => useView.getState().setSection({ on: !section })}>
+        <SquareSplitHorizontal size={18} />
       </IconButton>
-      <IconButton size="sm" label="Undo (Ctrl+Z)" onClick={() => useDoc.getState().undo()}><Undo2 size={14} /></IconButton>
-      <IconButton size="sm" label="Redo (Ctrl+Y)" onClick={() => useDoc.getState().redo()}><Redo2 size={14} /></IconButton>
+      <span className="w-px h-10 mx-1 bg-border" aria-hidden />
+      <IconButton label="Undo (Ctrl+Z)" className={VB} disabled={!canUndo} onClick={() => useDoc.getState().undo()}><Undo2 size={18} /></IconButton>
+      <IconButton label="Redo (Ctrl+Y)" className={VB} disabled={!canRedo} onClick={() => useDoc.getState().redo()}><Redo2 size={18} /></IconButton>
     </div>
   );
 }
