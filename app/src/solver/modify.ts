@@ -316,3 +316,131 @@ export function extendLine(s: S, uid: () => Id, lineId: Id, click: Pt): string |
   s.dimensions = s.dimensions.filter((dm) => dm.lineId !== lineId);
   return null;
 }
+
+/* ---------- patterns inside a sketch ---------- */
+
+export type SketchPatternOptions =
+  | { kind: 'linear'; count: number; spacing: number; /** direction, degrees from sketch +x */ angle: number }
+  | { kind: 'circular'; count: number; /** total angle in degrees; 360 spaces copies evenly round */ total: number };
+
+/**
+ * Repeat the selected curves in a row or round a centre. For a circular pattern
+ * the centre is a selected point, else the sketch origin. Copies are plain
+ * geometry (they do not follow later changes to the original).
+ */
+export function patternEntities(s: S, uid: () => Id, ids: Id[], o: SketchPatternOptions): string | null {
+  const n = Math.round(o.count);
+  if (!(n >= 2 && n <= 200)) return 'The number of copies must be between 2 and 200.';
+  const sel = ids.map((id) => ent(s, id)).filter((e): e is SketchEntity => !!e);
+  const centrePt = o.kind === 'circular' ? sel.find((e) => e.kind === 'point') : undefined;
+  const curves = sel.filter((e) => e.kind !== 'point');
+  if (!curves.length) return 'Select the lines, arcs or circles to repeat.';
+  let move: (p: Pt, i: number) => Pt;
+  if (o.kind === 'linear') {
+    if (!(o.spacing > 0)) return 'The spacing must be more than zero.';
+    const a = (o.angle * Math.PI) / 180;
+    const d = { x: Math.cos(a) * o.spacing, y: Math.sin(a) * o.spacing };
+    move = (p, i) => ({ x: p.x + d.x * i, y: p.y + d.y * i });
+  } else {
+    if (!(o.total > 0 && o.total <= 360)) return 'The angle must be between 0 and 360 degrees.';
+    const step = ((o.total >= 360 ? o.total / n : o.total / (n - 1)) * Math.PI) / 180;
+    const c = centrePt?.kind === 'point' ? centrePt.p : { x: 0, y: 0 };
+    move = (p, i) => {
+      const [cs, sn] = [Math.cos(step * i), Math.sin(step * i)];
+      return { x: c.x + (p.x - c.x) * cs - (p.y - c.y) * sn, y: c.y + (p.x - c.x) * sn + (p.y - c.y) * cs };
+    };
+  }
+  for (let i = 1; i < n; i++) {
+    const copies = new Map<Id, Id>();
+    const copy = (id: Id): Id => {
+      if (!copies.has(id)) {
+        const nid = uid();
+        s.entities.push({ id: nid, kind: 'point', p: move(P(s, id), i), construction: !!ent(s, id)?.construction });
+        copies.set(id, nid);
+      }
+      return copies.get(id)!;
+    };
+    for (const c of curves) {
+      const id = uid();
+      if (c.kind === 'line') s.entities.push({ id, kind: 'line', p1: copy(c.p1), p2: copy(c.p2), construction: c.construction });
+      else if (c.kind === 'circle') s.entities.push({ id, kind: 'circle', center: copy(c.center), radius: c.radius, construction: c.construction });
+      else if (c.kind === 'arc') s.entities.push({ id, kind: 'arc', center: copy(c.center), start: copy(c.start), end: copy(c.end), ccw: c.ccw, construction: c.construction });
+      else if (c.kind === 'spline') s.entities.push({ id, kind: 'spline', points: c.points.map(copy), construction: c.construction });
+    }
+  }
+  return null;
+}
+
+/* ---------- convert model edges ---------- */
+
+/** An edge of the model, already in sketch coordinates. */
+export type FlatEdge =
+  | { kind: 'line'; a: Pt; b: Pt }
+  | { kind: 'circle'; c: Pt; r: number }
+  /** an arc through a, m, b in that order */
+  | { kind: 'arc'; a: Pt; m: Pt; b: Pt }
+  /** any other curve, as points along it */
+  | { kind: 'curve'; pts: Pt[] };
+
+/**
+ * Add model edges to a sketch as fixed geometry. Ends that meet share a point,
+ * so the converted outline is closed and can be extruded at once.
+ */
+export function addConvertedEdges(s: S, uid: () => Id, edges: FlatEdge[]): string | null {
+  if (!edges.length) return 'There are no edges to convert.';
+  const made: { id: Id; p: Pt }[] = [];
+  const tol = 1e-6;
+  const point = (p: Pt, fixed = true): Id => {
+    const hit = made.find((m) => Math.hypot(m.p.x - p.x, m.p.y - p.y) < tol);
+    if (hit) return hit.id;
+    const id = uid();
+    s.entities.push({ id, kind: 'point', p: { ...p }, construction: false });
+    if (fixed) s.constraints.push({ id: uid(), kind: 'fix', entityIds: [id], at: { ...p } });
+    made.push({ id, p });
+    return id;
+  };
+  for (const e of edges) {
+    if (e.kind === 'line') s.entities.push({ id: uid(), kind: 'line', p1: point(e.a), p2: point(e.b), construction: false });
+    else if (e.kind === 'circle') {
+      const id = uid();
+      s.entities.push({ id, kind: 'circle', center: point(e.c), radius: e.r, construction: false });
+      const dn = Math.max(0, ...s.dimensions.map((x) => Number(x.name.slice(1)) || 0)) + 1;
+      s.dimensions.push({ id: uid(), name: `D${dn}`, kind: 'diameter', entityIds: [id], value: { expr: String(+(2 * e.r).toFixed(6)), value: 2 * e.r }, driving: true });
+    } else if (e.kind === 'arc') {
+      const c = circumcentre(e.a, e.m, e.b);
+      if (!c) {
+        s.entities.push({ id: uid(), kind: 'line', p1: point(e.a), p2: point(e.b), construction: false });
+        continue;
+      }
+      // counter-clockwise when the middle point is to the left of a→b
+      const ccw = (e.b.x - e.a.x) * (e.m.y - e.a.y) - (e.b.y - e.a.y) * (e.m.x - e.a.x) < 0;
+      const r = Math.hypot(e.a.x - c.x, e.a.y - c.y);
+      const a0 = Math.atan2(e.a.y - c.y, e.a.x - c.x);
+      const turn = (x: number) => ((x % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+      const sweep = ccw ? turn(Math.atan2(e.b.y - c.y, e.b.x - c.x) - a0) : turn(a0 - Math.atan2(e.b.y - c.y, e.b.x - c.x));
+      // Each piece: ends fixed, radius dimensioned, the centre follows. Pieces stay
+      // under 120°, because near a half circle those equations stop pinning the arc.
+      const k = Math.max(1, Math.ceil(sweep / ((2 * Math.PI) / 3) - 1e-9));
+      const at = (i: number) => (i === 0 ? e.a : i === k ? e.b : { x: c.x + r * Math.cos(a0 + ((ccw ? 1 : -1) * sweep * i) / k), y: c.y + r * Math.sin(a0 + ((ccw ? 1 : -1) * sweep * i) / k) });
+      for (let i = 0; i < k; i++) {
+        const id = uid();
+        const centre = uid(); // its own centre: a shared one would be held twice
+        s.entities.push({ id: centre, kind: 'point', p: { ...c }, construction: true });
+        s.entities.push({ id, kind: 'arc', center: centre, start: point(at(i)), end: point(at(i + 1)), ccw, construction: false });
+        const dn = Math.max(0, ...s.dimensions.map((x) => Number(x.name.slice(1)) || 0)) + 1;
+        s.dimensions.push({ id: uid(), name: `D${dn}`, kind: 'radius', entityIds: [id], value: { expr: String(+r.toFixed(6)), value: r }, driving: true });
+      }
+    } else if (e.pts.length >= 2) {
+      const pts = e.pts.map((p) => point(p));
+      s.entities.push({ id: uid(), kind: 'spline', points: pts, construction: false });
+    }
+  }
+  return null;
+}
+
+function circumcentre(a: Pt, b: Pt, c: Pt): Pt | null {
+  const d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+  if (Math.abs(d) < 1e-12) return null;
+  const [A, B, C] = [a.x * a.x + a.y * a.y, b.x * b.x + b.y * b.y, c.x * c.x + c.y * c.y];
+  return { x: (A * (b.y - c.y) + B * (c.y - a.y) + C * (a.y - b.y)) / d, y: (A * (c.x - b.x) + B * (a.x - c.x) + C * (b.x - a.x)) / d };
+}

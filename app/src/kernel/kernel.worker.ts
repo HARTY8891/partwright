@@ -14,6 +14,8 @@ import { axisLine, resolveAxis } from '../model/axes';
 import { holeProfile } from '../model/holes';
 import { helixGeom } from '../model/helix';
 import { fromBase64, parseSTL, stlPart } from '../model/importFormats';
+import type { FlatEdge } from '../solver/modify';
+import { patternPoints } from '../model/refs';
 
 export interface FeatureStatus {
   id: string;
@@ -384,6 +386,26 @@ function apply(doc: PartDocument, body: Shape3D | null, f: FeatureDraft): Shape3
       }
       return out;
     }
+    case 'sketchPattern': {
+      if (!body) throw new Error('There is no solid yet.');
+      const sk = sketchOf(doc, f.sketchId);
+      const frame = frameForSketch(doc, sk.id)!;
+      const pts = patternPoints(sk.sketch);
+      if (!pts.length) throw new Error(`${sk.name} has no points. Draw points or circles where the copies go.`);
+      let out: Shape3D = body;
+      for (const t of seedTools(doc, f.seeds)) {
+        // the seed's centre, moved within the sketch plane onto each point
+        const com = measureShapeVolumeProperties(t.solid).centerOfMass as unknown as Vec3;
+        for (const p of pts) {
+          const w = toWorld(frame, p);
+          let v = sub(w, com);
+          v = sub(v, scale(frame.normal, dot(v, frame.normal)));
+          if (Math.hypot(...v) < 1e-6) continue;
+          out = combine(out, t.solid.clone().translate(v) as Shape3D, t.cut, false);
+        }
+      }
+      return out;
+    }
     case 'mirror': {
       if (!body) throw new Error('There is no solid yet.');
       const pl = planeById(doc, f.planeId);
@@ -653,7 +675,62 @@ function messageOf(e: unknown): string {
   return String(e);
 }
 
+/* ---------- convert entities ---------- */
+
+/**
+ * The edges of the part's flat faces that lie in a sketch's plane, in that
+ * sketch's coordinates. Uses the solid as it is just before the sketch.
+ */
+function planarEdges(doc: PartDocument, sketchId: string): FlatEdge[] | { error: string } {
+  const idx = doc.features.findIndex((f) => f.id === sketchId);
+  const frame = frameForSketch(doc, sketchId);
+  if (idx < 0 || !frame) return { error: 'The sketch has no plane.' };
+  const { body } = replay({ ...doc, rollbackIndex: Math.min(idx, doc.rollbackIndex) });
+  if (!body) return { error: 'There is no solid before this sketch to take edges from.' };
+  const flat = (v: { x: number; y: number; z: number }) => {
+    const r = sub([v.x, v.y, v.z], frame.origin);
+    return { x: dot(r, frame.xDir), y: dot(r, frame.yDir) };
+  };
+  const height = (v: { x: number; y: number; z: number }) => dot(sub([v.x, v.y, v.z], frame.origin), frame.normal);
+  const out: FlatEdge[] = [];
+  const seen = new Set<string>();
+  for (const face of body.faces) {
+    if (face.geomType !== 'PLANE') continue;
+    const c = face.center;
+    const n = face.normalAt(c);
+    if (Math.abs(height(c)) > 1e-4 || Math.abs(Math.abs(n.x * frame.normal[0] + n.y * frame.normal[1] + n.z * frame.normal[2]) - 1) > 1e-6) continue;
+    for (const e of face.edges) {
+      const [a, m, b] = [e.pointAt(0), e.pointAt(0.5), e.pointAt(1)];
+      const key = [a, m, b].map((v) => `${v.x.toFixed(5)},${v.y.toFixed(5)},${v.z.toFixed(5)}`).sort().join('|');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const t = e.geomType;
+      if (t === 'LINE') out.push({ kind: 'line', a: flat(e.startPoint), b: flat(e.endPoint) });
+      else if (t === 'CIRCLE' && e.isClosed) {
+        const [p0, p1, p2] = [flat(e.pointAt(0)), flat(e.pointAt(1 / 3)), flat(e.pointAt(2 / 3))];
+        const cc = centre3(p0, p1, p2);
+        if (cc) out.push({ kind: 'circle', c: cc, r: Math.hypot(p0.x - cc.x, p0.y - cc.y) });
+      } else if (t === 'CIRCLE') out.push({ kind: 'arc', a: flat(e.startPoint), m: flat(m), b: flat(e.endPoint) });
+      else out.push({ kind: 'curve', pts: Array.from({ length: 9 }, (_, i) => flat(e.pointAt(i / 8))) });
+    }
+  }
+  if (!out.length) return { error: "No flat face of the part lies in this sketch's plane. Sketch on a face of the part, then convert its edges." };
+  return out;
+}
+
+function centre3(a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }) {
+  const d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+  if (Math.abs(d) < 1e-12) return null;
+  const [A, B, C] = [a.x * a.x + a.y * a.y, b.x * b.x + b.y * b.y, c.x * c.x + c.y * c.y];
+  return { x: (A * (b.y - c.y) + B * (c.y - a.y) + C * (a.y - b.y)) / d, y: (A * (c.x - b.x) + B * (a.x - c.x) + C * (b.x - a.x)) / d };
+}
+
 const api = {
+  async planarEdges(doc: PartDocument, sketchId: string) {
+    await init();
+    await loadImports(doc);
+    return planarEdges(doc, sketchId);
+  },
   async init() {
     await init();
     return true;

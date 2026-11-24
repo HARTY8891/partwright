@@ -11,7 +11,7 @@ import { useDoc } from '../store/docStore';
 import { useKernel } from '../store/rebuild';
 import { kernel } from '../kernel/client';
 import { useView } from '../viewport/viewStore';
-import { faceLabel, vertexLabel } from '../model/refs';
+import { faceLabel, patternPoints, vertexLabel } from '../model/refs';
 import { holeSize, ISO_HOLES } from '../model/holes';
 import { docVars, evalVariables, NAME_RE } from '../model/equations';
 import { isSeedType, sketchesOf, type AxisFeature, type FeatureDraft, type PartDocument, type PatternAxis, type Variable } from '../model/types';
@@ -87,6 +87,27 @@ export function MoreFeatureOptions({ draft }: { draft: D }) {
         <NumberField label="Wall thickness" value={draft.thickness.expr} {...len} onCommit={(expr, value) => s.updateDraft((d) => void (d.type === 'shell' && (d.thickness = { expr, value })))} />
       </PanelSection>
     );
+
+  if (draft.type === 'sketchPattern') {
+    const candidates = doc.features.slice(0, doc.rollbackIndex).filter((f) => isSeedType(f.type));
+    const used = new Set(doc.features.flatMap((f) => sketchesOf(f)));
+    const sketches = doc.features.slice(0, doc.rollbackIndex).filter((f) => f.type === 'sketch' && (!used.has(f.id) || f.id === draft.sketchId));
+    const sk = sketches.find((f) => f.id === draft.sketchId);
+    const n = sk?.type === 'sketch' ? patternPoints(sk.sketch).length : 0;
+    return (
+      <>
+        <PanelSection title="Features to repeat">
+          {candidates.map((f) => (
+            <Checkbox key={f.id} label={f.name} checked={draft.seeds.includes(f.id)} onChange={() => s.toggleSeed(f.id)} />
+          ))}
+        </PanelSection>
+        <PanelSection title="Where the copies go">
+          <Select label="Sketch with points" value={draft.sketchId} onChange={(v) => s.updateDraft((d) => void (d.type === 'sketchPattern' && (d.sketchId = v)))} options={sketches.map((f) => ({ value: f.id, label: f.name }))} />
+          <p className="text-2xs text-text-muted">{n === 1 ? '1 point' : `${n} points`}. Each copy's centre moves onto a point (sketch points and circle centres), staying in the sketch's plane.</p>
+        </PanelSection>
+      </>
+    );
+  }
 
   if (draft.type === 'linearPattern' || draft.type === 'circularPattern' || draft.type === 'mirror') {
     const candidates = doc.features.slice(0, doc.rollbackIndex).filter((f) => isSeedType(f.type));
@@ -270,7 +291,7 @@ export function needsPick(d: D): string | null {
   if (d.type === 'fillet' || d.type === 'chamfer') return d.edges.length ? null : 'Click edges on the model to add or remove them.';
   if (d.type === 'hole') return d.at ? null : 'Click a flat face where the hole should start.';
   if (d.type === 'shell') return d.faces.length ? null : 'Click the faces to open. The rest becomes a wall.';
-  if (d.type === 'linearPattern' || d.type === 'circularPattern' || d.type === 'mirror') return d.seeds.length ? null : 'Tick the features to repeat.';
+  if (d.type === 'linearPattern' || d.type === 'circularPattern' || d.type === 'mirror' || d.type === 'sketchPattern') return d.seeds.length ? null : 'Tick the features to repeat.';
   if ((d.type === 'extrude' || d.type === 'cutExtrude') && d.direction1.type === 'upToFace' && !d.direction1.face) return 'Click the flat face to extrude up to.';
   if ((d.type === 'extrude' || d.type === 'cutExtrude') && d.direction1.type === 'upToVertex' && !d.direction1.vertex) return 'Click near a corner of the model to extrude up to.';
   if (d.type === 'loft' && d.sketchIds.length < 2) return 'Tick two or more sketches, in order.';

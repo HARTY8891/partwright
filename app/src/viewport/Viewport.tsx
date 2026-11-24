@@ -860,7 +860,10 @@ function ActiveSketch({ sketchId, doc }: { sketchId: Id; doc: PartDocument }) {
     }
     const pk = pickAt(p);
     const all = [...picks, pk];
-    if (tool === 'rect' && all.length === 2) {
+    if (tool === 'point') {
+      store.addPoint(pk);
+      setPicks([]);
+    } else if (tool === 'rect' && all.length === 2) {
       store.addRect(all[0], all[1]);
       setPicks([]);
     } else if (tool === 'circle' && all.length === 2) {

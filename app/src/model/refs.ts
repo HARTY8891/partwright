@@ -13,6 +13,26 @@ import { bezierAt, sampleSpline, splineSpans } from './spline';
 /** Through-all extrudes and cuts reach this far (mm). */
 export const THROUGH_ALL = 2000;
 
+/**
+ * Where a sketch-driven pattern puts copies: points not used by any curve, and
+ * the centres of circles (construction geometry and the origin are left out).
+ */
+export function patternPoints(sk: Sketch): Pt[] {
+  const used = new Set<Id>();
+  for (const e of sk.entities) {
+    if (e.kind === 'line') used.add(e.p1).add(e.p2);
+    else if (e.kind === 'circle') used.add(e.center);
+    else if (e.kind === 'arc') used.add(e.center).add(e.start).add(e.end);
+    else if (e.kind === 'spline') e.points.forEach((p) => used.add(p));
+  }
+  const out: Pt[] = [];
+  for (const e of sk.entities) {
+    if (e.kind === 'point' && !e.construction && !used.has(e.id)) out.push(e.p);
+    if (e.kind === 'circle' && !e.construction) out.push(pointOf(sk, e.center));
+  }
+  return out;
+}
+
 export const pointOf = (sk: Sketch, id: Id): Pt => {
   const e = sk.entities.find((q) => q.id === id);
   return e && e.kind === 'point' ? e.p : { x: 0, y: 0 };

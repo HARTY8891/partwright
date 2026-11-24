@@ -254,6 +254,14 @@ export interface PatternFeature extends FeatureBase {
   reverse: boolean;
 }
 
+/** Copies of features placed on the points of a sketch (sketch-driven pattern). */
+export interface SketchPatternFeature extends FeatureBase {
+  type: 'sketchPattern';
+  seeds: Id[];
+  /** the sketch whose points (and circle centres) say where the copies go */
+  sketchId: Id;
+}
+
 /** A solid read from another program's file, kept inside the part (geometry only, no history). */
 export interface ImportFeature extends FeatureBase {
   type: 'import';
@@ -276,10 +284,10 @@ export interface MirrorFeature extends FeatureBase {
 export type Feature =
   | PlaneFeature | SketchFeature | ExtrudeFeature | RevolveFeature | EdgeFeature
   | HoleFeature | ShellFeature | PatternFeature | MirrorFeature | ImportFeature | LoftFeature | SweepFeature | AxisFeature
-  | RibFeature | HelixFeature;
+  | RibFeature | HelixFeature | SketchPatternFeature;
 export type SolidFeature =
   | ExtrudeFeature | RevolveFeature | EdgeFeature | HoleFeature | ShellFeature | PatternFeature | MirrorFeature | ImportFeature
-  | LoftFeature | SweepFeature | RibFeature;
+  | LoftFeature | SweepFeature | RibFeature | SketchPatternFeature;
 export type SolidType = SolidFeature['type'];
 
 export interface PartDocument {
@@ -341,7 +349,7 @@ export const sketchesOf = (f: Feature): Id[] =>
       ? f.sketchIds
       : f.type === 'sweep'
         ? [f.profileId, f.pathId]
-        : f.type === 'rib' || f.type === 'helix'
+        : f.type === 'rib' || f.type === 'helix' || f.type === 'sketchPattern'
           ? [f.sketchId]
           : [];
 

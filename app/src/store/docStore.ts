@@ -13,12 +13,13 @@ import { applyEquations } from '../model/equations';
 import { axisInputs } from '../model/axes';
 import { rawVertexDepth, resolveVertexDepths } from '../model/refs';
 import { polygonShape, slotShape } from '../solver/shapes';
-import { extendLine, filletCorner, mirrorEntities, offsetEntities, trimLine } from '../solver/modify';
+import { addConvertedEdges, extendLine, filletCorner, mirrorEntities, offsetEntities, patternEntities, trimLine, type SketchPatternOptions } from '../solver/modify';
+import { kernel } from '../kernel/client';
 import { useView } from '../viewport/viewStore';
 import { useSettings } from './settings';
 import { exprFor, type Units } from '../model/units';
 
-export type Tool = 'select' | 'line' | 'centerline' | 'rect' | 'circle' | 'arc' | 'polygon' | 'slot' | 'spline' | 'trim' | 'extend' | 'dimension';
+export type Tool = 'select' | 'point' | 'line' | 'centerline' | 'rect' | 'circle' | 'arc' | 'polygon' | 'slot' | 'spline' | 'trim' | 'extend' | 'dimension';
 
 export type Mode =
   | { kind: 'model' }
@@ -71,6 +72,11 @@ interface State {
   addRelation(kind: ConstraintKind, entityIds: Id[]): boolean;
   /** sketch modify tools on the selected entities; return false (with a message) when the selection does not fit */
   mirrorSelection(ids: Id[]): boolean;
+  /** repeat the selected sketch curves in a row or round a centre */
+  patternSelection(ids: Id[], o: SketchPatternOptions): boolean;
+  /** copy the edges of the part's faces in the sketch plane into the sketch, fixed */
+  convertEdges(): Promise<boolean>;
+  addPoint(at: PointPick): void;
   filletSelection(ids: Id[], radius: number): boolean;
   offsetSelection(ids: Id[], distance: number): boolean;
   removeConstraint(id: Id): void;
@@ -129,7 +135,7 @@ export function makeDoc(units: Units = 'mm'): PartDocument {
 
 const BASE_NAMES: Record<FeatureDraft['type'], string> = {
   extrude: 'Extrude', cutExtrude: 'Cut', revolve: 'Revolve', cutRevolve: 'CutRevolve', fillet: 'Fillet', chamfer: 'Chamfer',
-  hole: 'Hole', shell: 'Shell', linearPattern: 'LPattern', circularPattern: 'CPattern', mirror: 'Mirror', plane: 'Plane', import: 'Import',
+  hole: 'Hole', shell: 'Shell', linearPattern: 'LPattern', circularPattern: 'CPattern', sketchPattern: 'SketchPattern', mirror: 'Mirror', plane: 'Plane', import: 'Import',
   loft: 'Loft', sweep: 'Sweep', axis: 'Axis', rib: 'Rib', helix: 'Helix',
 };
 
@@ -162,6 +168,7 @@ export function directDependents(doc: PartDocument, id: Id): Feature[] {
     if (x.type === 'fillet' || x.type === 'chamfer') return x.edges.some((e) => e.featureId === id);
     if (x.type === 'linearPattern' || x.type === 'circularPattern') return x.seeds.includes(id) || x.axisId === id;
     if (x.type === 'mirror') return x.seeds.includes(id) || x.planeId === id;
+    if (x.type === 'sketchPattern') return x.seeds.includes(id);
     if (x.type === 'hole') return x.at?.face.featureId === id;
     if (x.type === 'shell') return x.faces.some((fp) => fp.face.featureId === id);
     if (x.type === 'axis') return axisInputs(x.def).includes(id);
@@ -595,6 +602,30 @@ export const useDoc = create<State>((set, get) => {
         s.constraints.push({ id: uid(), kind, entityIds, ...(at ? { at } : {}) });
       });
     },
+    patternSelection: (ids, o) => {
+      let err: string | null = null;
+      const res = sketchChange((s) => void (err = patternEntities(s as Sketch, uid, ids, o)));
+      if (err) get().notify('info', err);
+      return !err && !!res;
+    },
+    convertEdges: async () => {
+      const m = get().mode;
+      if (m.kind !== 'sketch') return false;
+      const edges = await kernel.planarEdges(get().doc, m.sketchId);
+      if ('error' in edges) {
+        get().notify('info', edges.error);
+        return false;
+      }
+      let err: string | null = null;
+      const res = sketchChange((s) => void (err = addConvertedEdges(s as Sketch, uid, edges)));
+      if (err) get().notify('info', err);
+      else if (res) get().notify('success', `Converted ${edges.length} edge${edges.length === 1 ? '' : 's'} into the sketch. They are fixed in place.`);
+      return !err && !!res;
+    },
+    addPoint: (at) => {
+      if ('id' in at) return;
+      sketchChange((s) => void s.entities.push({ id: uid(), kind: 'point', p: { ...at.at }, construction: false }));
+    },
     mirrorSelection: (ids) => {
       let err: string | null = null;
       const res = sketchChange((s) => void (err = mirrorEntities(s as Sketch, uid, ids)));
@@ -666,7 +697,7 @@ export const useDoc = create<State>((set, get) => {
       const m = get().mode;
       if (m.kind !== 'sketch') return;
       const sk = getSketch(get().doc, m.sketchId);
-      const empty = !sk || !sk.sketch.entities.some((e) => e.kind !== 'point');
+      const empty = !sk || !sk.sketch.entities.some((e) => e.kind !== 'point' || !e.construction); // the origin point is construction
       if (empty && m.isNew) {
         // Nothing drawn: leave no empty sketch behind.
         set({ doc: m.snapshot, mode: { kind: 'model' }, solve: null, editingDimId: null, selection: null });
@@ -718,6 +749,21 @@ export const useDoc = create<State>((set, get) => {
             ? { type: 'sketchLine' as const, sketchId: sel.id, lineId: line.id }
             : { type: 'planes' as const, a: sel?.type === 'plane' ? sel.id : planes[0].id, b: planes.find((p) => p.id !== (sel?.type === 'plane' ? sel.id : planes[0].id))!.id };
         set({ mode: { kind: 'feature', draft: { type: 'axis', def } } });
+        return;
+      }
+      if (type === 'sketchPattern') {
+        if (!hasSolid) {
+          get().notify('info', 'Make a solid first.');
+          return;
+        }
+        const used = consumedSketches(doc0);
+        const sel = doc0.features.find((f) => f.id === get().selection);
+        const sk = sel?.type === 'sketch' && !used.has(sel.id) ? sel : doc0.features.slice(0, doc0.rollbackIndex).reverse().find((f) => f.type === 'sketch' && !used.has(f.id));
+        if (!sk) {
+          get().notify('info', 'Draw a sketch with points where the copies go, then choose Sketch pattern.');
+          return;
+        }
+        set({ mode: { kind: 'feature', draft: { type, seeds: seedsFromSelection(), sketchId: sk.id } } });
         return;
       }
       if (type === 'hole' || type === 'shell' || type === 'linearPattern' || type === 'circularPattern' || type === 'mirror') {
@@ -870,7 +916,7 @@ export const useDoc = create<State>((set, get) => {
       }),
     toggleSeed: (id) =>
       get().updateDraft((d) => {
-        if (d.type !== 'linearPattern' && d.type !== 'circularPattern' && d.type !== 'mirror') return;
+        if (d.type !== 'linearPattern' && d.type !== 'circularPattern' && d.type !== 'mirror' && d.type !== 'sketchPattern') return;
         const i = d.seeds.indexOf(id);
         if (i >= 0) d.seeds.splice(i, 1);
         else d.seeds.push(id);

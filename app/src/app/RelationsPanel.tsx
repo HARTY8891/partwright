@@ -144,7 +144,8 @@ function ModifySection({ ids, sk }: { ids: Id[]; sk: Sketch }) {
   const canMirror = hasAxis && kinds.some((e) => e && e.kind !== 'point' && !(e.kind === 'line' && e.construction));
   const canFillet = (kinds.length === 1 && kinds[0]?.kind === 'point') || (kinds.length === 2 && kinds.every((e) => e?.kind === 'line'));
   const canOffset = kinds.length > 0 && (kinds.every((e) => e?.kind === 'circle') || (kinds.length >= 3 && kinds.every((e) => e?.kind === 'line' && !e.construction)));
-  if (!canMirror && !canFillet && !canOffset) return null;
+  const canPattern = kinds.some((e) => e && e.kind !== 'point');
+  if (!canMirror && !canFillet && !canOffset && !canPattern) return null;
   const done = () => useViewStore.getState().setSketchSel([]);
   return (
     <PanelSection title="Modify">
@@ -178,6 +179,44 @@ function ModifySection({ ids, sk }: { ids: Id[]; sk: Sketch }) {
           </label>
         </>
       )}
+      {canPattern && <SketchPattern ids={ids} />}
     </PanelSection>
+  );
+}
+
+/** Linear and circular patterns of the selected curves. */
+function SketchPattern({ ids }: { ids: Id[] }) {
+  const units = useDoc((s) => s.doc.units);
+  const k = units === 'in' ? 25.4 : 1;
+  const [count, setCount] = useState(4);
+  const [spacing, setSpacing] = useState(units === 'in' ? 0.5 * 25.4 : 10);
+  const [angle, setAngle] = useState(0);
+  const [total, setTotal] = useState(360);
+  const s = useDoc.getState();
+  const done = () => useViewStore.getState().setSketchSel([]);
+  return (
+    <div className="flex flex-col gap-2 pt-2">
+      <NumberField label="Pattern copies (including the original)" unit="" min={2} value={String(count)} onCommit={(_, v) => setCount(Math.round(v))} />
+      <div className="flex items-end gap-2">
+        <div className="flex-1">
+          <NumberField key={`s${units}`} label="Pattern spacing" lengthUnits={units} min={0.001} value={String(+(spacing / k).toFixed(4))} onCommit={(_, v) => setSpacing(v)} />
+        </div>
+        <div className="flex-1">
+          <NumberField label="Pattern direction" unit="°" value={String(angle)} onCommit={(_, v) => setAngle(v)} />
+        </div>
+      </div>
+      <Button size="sm" onClick={() => s.patternSelection(ids, { kind: 'linear', count, spacing, angle }) && done()}>
+        Linear pattern
+      </Button>
+      <div className="flex items-end gap-2">
+        <div className="flex-1">
+          <NumberField label="Pattern angle" unit="°" min={0.001} value={String(total)} onCommit={(_, v) => setTotal(v)} />
+        </div>
+        <Button size="sm" onClick={() => s.patternSelection(ids, { kind: 'circular', count, total }) && done()}>
+          Circular pattern
+        </Button>
+      </div>
+      <p className="text-2xs text-text-muted">A circular pattern turns round a selected point, or the origin.</p>
+    </div>
   );
 }
