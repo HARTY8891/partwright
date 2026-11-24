@@ -4,7 +4,7 @@ import {
   Axis3D, Box, Circle, CircleDot, Eye, EyeOff, Hexagon, Layers, Maximize, Minus, MousePointer2, PenLine,
   RectangleHorizontal, Redo2, Rotate3D, Ruler, Scale3D, Scissors, Square, Trash2, Undo2, Pencil, Loader2,
   Spline, SquareDashed, Cylinder, MoveDiagonal, CircleDashed, PackageOpen, Columns3, RotateCw, FlipHorizontal2,
-  Layers2, Pentagon, RectangleEllipsis, Variable as VariableIcon, SquareSplitHorizontal, Waves, ScissorsLineDashed, ArrowRightToLine, FileInput,
+  Layers2, Pentagon, RectangleEllipsis, Variable as VariableIcon, SquareSplitHorizontal, Waves, ScissorsLineDashed, ArrowRightToLine, FileInput, Blend, Route,
 } from 'lucide-react';
 import { useDoc, consumedSketches, getSketch, type Tool } from '../store/docStore';
 import { exportFile, startKernelSync, useKernel } from '../store/rebuild';
@@ -14,7 +14,7 @@ import { migrate } from '../model/migrate';
 import { StartDialog, ErrorsDialog, VersionsDialog, useDialogs, useStartOnLaunch } from './Dialogs';
 import { RelationsPanel } from './RelationsPanel';
 import { CommandPalette, usePalette } from './CommandPalette';
-import { EquationsDialog, MassDialog, MeasurePanel, MoreFeatureOptions, OptionsDialog, PolygonOptions, SecondDirection, SectionPanel, ThinWall, needsPick, useToolDialogs } from './MorePanels';
+import { ConfigPicker, ConfigurationsDialog, EquationsDialog, MassDialog, MeasurePanel, MoreFeatureOptions, OptionsDialog, PolygonOptions, SecondDirection, SectionPanel, ThinWall, DraftOption, FaceColour, needsPick, useToolDialogs } from './MorePanels';
 import { RollbackBar } from '../ui/Tree';
 import { docVars } from '../model/equations';
 import { Viewport } from '../viewport/Viewport';
@@ -26,7 +26,7 @@ import { ConfirmCorner, FeaturePanel, MessageBanner, PanelSection } from '../ui/
 import { Checkbox, NumberField, Select, SelectionBox } from '../ui/Fields';
 import { StatusBar, ToastProvider, TooltipProvider, useToast } from '../ui/Overlay';
 import type { Feature, FeatureDraft } from '../model/types';
-import { usesSketch } from '../model/types';
+import { sketchesOf } from '../model/types';
 import { edgeLabel, faceLabel } from '../model/refs';
 import { frameForSketch, toWorld } from '../model/planes';
 import { cn } from '../ui/cn';
@@ -110,6 +110,7 @@ function Shell() {
       <VersionsDialog />
       <CommandPalette />
       <OptionsDialog />
+      <ConfigurationsDialog />
       <EquationsDialog />
       <MassDialog />
     </div>
@@ -275,6 +276,8 @@ function CommandRibbon() {
           <RibbonDivider />
           {feat('extrude', <Box size={24} />, 'Extrude', 'E')}
           {feat('revolve', <Rotate3D size={24} />, 'Revolve')}
+          {feat('loft', <Blend size={24} />, 'Loft')}
+          {feat('sweep', <Route size={24} />, 'Sweep')}
           <RibbonDivider />
           {feat('cutExtrude', <Scissors size={24} />, 'Cut', 'X')}
           {feat('cutRevolve', <Cylinder size={24} />, 'Cut revolve')}
@@ -344,6 +347,7 @@ const ICONS: Record<Feature['type'], ReactNode> = {
   revolve: <Rotate3D size={16} />, cutRevolve: <Cylinder size={16} />, fillet: <CircleDot size={16} />, chamfer: <Hexagon size={16} />,
   hole: <CircleDashed size={16} />, shell: <PackageOpen size={16} />, linearPattern: <Columns3 size={16} />,
   circularPattern: <RotateCw size={16} />, mirror: <FlipHorizontal2 size={16} />, import: <FileInput size={16} />,
+  loft: <Blend size={16} />, sweep: <Route size={16} />,
 };
 const iconFor = (f: Feature) => ICONS[f.type];
 
@@ -388,18 +392,16 @@ function FeatureTree() {
           (f.type === 'plane' && f.def.type === 'default') || (f.type === 'sketch' && used.has(f.id)) || mode.kind !== 'model'
             ? undefined
             : (dir) => {
-                // step over a whole feature (with its sketch), not one row
-                const i = doc.features.indexOf(f);
-                const blockStart = usesSketch(f) ? doc.features.findIndex((x) => x.id === f.sketchId) : i;
+                // step over a whole row of the tree (a feature with its sketches), not one feature
+                const top = doc.features.filter((x) => !(x.type === 'sketch' && used.has(x.id)));
+                const k = top.indexOf(f);
+                const blockStart = (x: Feature) => Math.min(doc.features.indexOf(x), ...sketchesOf(x).map((id) => doc.features.findIndex((y) => y.id === id)));
                 if (dir < 0) {
-                  const prev = doc.features[blockStart - 1];
-                  const prevStart = prev && prev.type === 'sketch' && used.has(prev.id) ? blockStart - 1 : prev && usesSketch(prev) ? doc.features.findIndex((x) => x.id === prev.sketchId) : blockStart - 1;
-                  s.moveFeature(f.id, prevStart);
+                  const prev = top[k - 1];
+                  if (prev) s.moveFeature(f.id, blockStart(prev));
                 } else {
-                  const after = doc.features[i + 1];
-                  if (!after) return;
-                  const afterEnd = after.type === 'sketch' && used.has(after.id) ? doc.features.findIndex((x) => usesSketch(x) && x.sketchId === after.id) : i + 1;
-                  s.moveFeature(f.id, afterEnd + 1);
+                  const next = top[k + 1];
+                  if (next) s.moveFeature(f.id, doc.features.indexOf(next) + 1);
                 }
               }
         }
@@ -421,6 +423,7 @@ function FeatureTree() {
           <Trash2 size={14} />
         </IconButton>
       </div>
+      <ConfigPicker />
       <Tree label="Feature tree" hasSelection={!!sel}>
         <TreeItem icon={<Axis3D size={16} />} label="Origin" />
         {doc.features.map((f, i) => {
@@ -429,13 +432,13 @@ function FeatureTree() {
             i === doc.rollbackIndex && i >= 3 ? <RollbackBarRow key="rollback" index={doc.rollbackIndex} max={doc.features.length} /> : null;
           let row: ReactNode;
           if (f.type === 'sketch' && used.has(f.id)) row = null; // shown under the feature that uses it
-          else if (usesSketch(f)) {
-            const sk = getSketch(doc, f.sketchId);
+          else if (sketchesOf(f).length) {
+            const sks = sketchesOf(f).map((id) => getSketch(doc, id)).filter((x): x is NonNullable<typeof x> => !!x);
             const open = !collapsed.has(f.id);
             row = (
               <div key={f.id}>
-                {item(f, 1, sk ? open : undefined)}
-                {sk && open && item(sk, 2)}
+                {item(f, 1, sks.length ? open : undefined)}
+                {open && sks.map((sk) => item(sk, 2))}
               </div>
             );
           } else row = item(f, 1);
@@ -487,6 +490,7 @@ function RollbackBarRow({ index, max }: { index: number; max: number }) {
 const TITLES: Record<FeatureDraft['type'], string> = {
   extrude: 'Extrude', cutExtrude: 'Cut', revolve: 'Revolve', cutRevolve: 'Cut revolve', fillet: 'Fillet', chamfer: 'Chamfer',
   hole: 'Hole', shell: 'Shell', linearPattern: 'Linear pattern', circularPattern: 'Circular pattern', mirror: 'Mirror', plane: 'Plane', import: 'Imported solid',
+  loft: 'Loft', sweep: 'Sweep',
 };
 
 function FeatureOptions() {
@@ -525,12 +529,24 @@ function FeatureOptions() {
             <Select
               label="End condition"
               value={draft.direction1.type}
-              onChange={(v) => s.updateDraft((d) => void ('direction1' in d && (d.direction1.type = v)))}
+              onChange={(v) =>
+                s.updateDraft((d) => {
+                  if (!('direction1' in d)) return;
+                  d.direction1 =
+                    v === 'upToFace'
+                      ? { type: 'upToFace', depth: d.direction1.depth, face: null }
+                      : v === 'upToVertex'
+                        ? { type: 'upToVertex', depth: d.direction1.depth, vertex: null }
+                        : { type: v, depth: d.direction1.depth };
+                })
+              }
               options={[
                 { value: 'blind', label: 'Fixed depth' },
                 { value: 'midPlane', label: 'Symmetric about the plane' },
                 { value: 'throughAll', label: 'Through everything' },
                 { value: 'throughAllBoth', label: 'Through everything, both ways' },
+                { value: 'upToFace', label: 'Up to a face' },
+                { value: 'upToVertex', label: 'Up to a corner' },
               ]}
             />
             {(draft.direction1.type === 'blind' || draft.direction1.type === 'midPlane') && (
@@ -551,6 +567,8 @@ function FeatureOptions() {
         )}
         <SecondDirection draft={draft} />
         <ThinWall draft={draft} />
+        <DraftOption draft={draft} />
+        <FaceColour draft={draft} />
         <MoreFeatureOptions draft={draft} />
 
         {(draft.type === 'revolve' || draft.type === 'cutRevolve') && sketch && (
@@ -592,6 +610,25 @@ function FeatureOptions() {
               min={0.001}
               onCommit={(expr, value) => s.updateDraft((d) => void ('size' in d && (d.size = { expr, value })))}
             />
+            {draft.type === 'fillet' && (
+              <>
+                <Checkbox
+                  label="Different radius at the other end"
+                  checked={!!draft.size2}
+                  onChange={(v) => s.updateDraft((d) => void (d.type === 'fillet' && (d.size2 = v ? { ...d.size } : undefined)))}
+                />
+                {draft.size2 && (
+                  <NumberField
+                    label="End radius"
+                    lengthUnits={doc.units}
+                    vars={vars}
+                    min={0.001}
+                    value={draft.size2.expr}
+                    onCommit={(expr, value) => s.updateDraft((d) => void (d.type === 'fillet' && (d.size2 = { expr, value })))}
+                  />
+                )}
+              </>
+            )}
           </PanelSection>
         )}
       </FeaturePanel>

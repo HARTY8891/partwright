@@ -43,8 +43,14 @@ export function evalVariables(vars: Variable[] = []): { values: Record<string, n
   return { values, errors };
 }
 
+/** The variables in force: the base list with the active configuration's values on top. */
+export function effectiveVariables(doc: PartDocument): Variable[] {
+  const cfg = doc.configurations?.find((c) => c.id === doc.activeConfig);
+  return (doc.variables ?? []).map((v) => (cfg && cfg.values[v.name] !== undefined ? { ...v, expression: cfg.values[v.name] } : v));
+}
+
 /** The variable values of a document, for evaluating expressions as the user types. */
-export const docVars = (doc: PartDocument) => evalVariables(doc.variables).values;
+export const docVars = (doc: PartDocument) => evalVariables(effectiveVariables(doc)).values;
 
 type Kind = 'length' | 'angle' | 'count';
 
@@ -66,6 +72,7 @@ function featureParams(f: Draft<Feature>, each: (p: Draft<Param> | undefined, ki
       each(f.direction1.depth, 'length');
       each(f.direction2?.depth, 'length');
       each(f.thin?.thickness, 'length');
+      each(f.draft?.angle, 'angle');
       break;
     case 'revolve':
     case 'cutRevolve':
@@ -74,6 +81,7 @@ function featureParams(f: Draft<Feature>, each: (p: Draft<Param> | undefined, ki
     case 'fillet':
     case 'chamfer':
       each(f.size, 'length');
+      each(f.size2, 'length');
       break;
     case 'hole':
       each(f.diameter, 'length');
@@ -99,7 +107,7 @@ function featureParams(f: Draft<Feature>, each: (p: Draft<Param> | undefined, ki
 export function applyEquations(doc: PartDocument): PartDocument {
   const hasExpr = JSON.stringify(doc.features).includes('"expr":"=');
   if (!hasExpr && !doc.variables?.length) return doc;
-  const { values, errors } = evalVariables(doc.variables);
+  const { values, errors } = evalVariables(effectiveVariables(doc));
   return produce(doc, (d) => {
     for (const v of d.variables ?? []) v.value = errors[v.id] ? undefined : values[v.name];
     for (const f of d.features) {

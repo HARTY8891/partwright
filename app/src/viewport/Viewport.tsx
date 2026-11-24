@@ -7,8 +7,8 @@ import tokens from '../../../replica/design/tokens.json';
 import { useDoc, getSketch, consumedSketches, type PointPick } from '../store/docStore';
 import { useKernel } from '../store/rebuild';
 import { DEFAULT_FRAMES, frameForSketch, planeFrame, toLocal, toWorld, dot, sub, type Frame, type Vec3 } from '../model/planes';
-import { arcMid, candidateEdges, distToSegments, edgePoint, faceFrame, facePointWorld, pickFace } from '../model/refs';
-import type { EdgeRef, FaceRef, FacePoint, Id, PartDocument, PlaneFeature, Pt, Sketch } from '../model/types';
+import { arcMid, candidateEdges, candidateVertices, distToSegments, edgePoint, faceFrame, facePointWorld, pickFace, vertexPoint } from '../model/refs';
+import type { EdgeRef, FaceRef, FacePoint, Id, PartDocument, PlaneFeature, Pt, Sketch, VertexRef } from '../model/types';
 import type { MeshData } from '../kernel/client';
 import { pointOf } from '../solver/solve';
 import { sampleSpline } from '../model/spline';
@@ -230,6 +230,37 @@ function useMeshGeometry(mesh: MeshData | null) {
   }, [mesh]);
 }
 
+/**
+ * Per-vertex colours when any feature has its own colour: each model face is
+ * named (pickFace) and takes the colour of the feature that made it.
+ */
+function useFaceColors(mesh: MeshData | null, doc: PartDocument): THREE.BufferAttribute | null {
+  return useMemo(() => {
+    if (!mesh || !mesh.faceGroups || !doc.features.some((f) => f.color && !f.suppressed)) return null;
+    const tok = C as Record<string, string>;
+    const base = new THREE.Color(tok[doc.color ?? ''] ?? C['model-face']);
+    const colors = new Float32Array(mesh.vertices.length);
+    for (let i = 0; i < colors.length; i += 3) (colors[i] = base.r), (colors[i + 1] = base.g), (colors[i + 2] = base.b);
+    const v = mesh.vertices, n = mesh.normals, t = mesh.triangles;
+    for (let k = 0; k < mesh.faceGroups.length; k += 2) {
+      const start = mesh.faceGroups[k], count = mesh.faceGroups[k + 1];
+      if (!count) continue;
+      const [i0, i1, i2] = [t[start], t[start + 1], t[start + 2]];
+      const c: Vec3 = [0, 1, 2].map((a) => (v[i0 * 3 + a] + v[i1 * 3 + a] + v[i2 * 3 + a]) / 3) as Vec3;
+      const nn: Vec3 = [n[i0 * 3], n[i0 * 3 + 1], n[i0 * 3 + 2]];
+      const ref = pickFace(doc, c, nn);
+      const col = ref && doc.features.find((f) => f.id === ref.featureId)?.color;
+      if (!col || !tok[col]) continue;
+      const fc = new THREE.Color(tok[col]);
+      for (let j = start; j < start + count; j++) {
+        const vi = t[j] * 3;
+        (colors[vi] = fc.r), (colors[vi + 1] = fc.g), (colors[vi + 2] = fc.b);
+      }
+    }
+    return new THREE.BufferAttribute(colors, 3);
+  }, [mesh, doc]);
+}
+
 /** Triangles of the mesh that lie on a face's plane (for highlighting a picked face). */
 function faceTriangles(mesh: MeshData, f: Frame): THREE.BufferGeometry {
   const v = mesh.vertices;
@@ -302,11 +333,17 @@ function Body() {
   const pickedFace = useView((s) => s.pickedFace);
   const { camera, controls } = useThree() as unknown as { camera: THREE.Camera; controls: OrbitControlsImpl | null };
   const g = useMeshGeometry(mesh);
+  const faceColors = useFaceColors(mesh, doc);
   const [hoverFace, setHoverFace] = useState<FaceRef | null>(null);
+  const [hoverVertex, setHoverVertex] = useState<VertexRef | null>(null);
   const [hoverEdge, setHoverEdge] = useState<number | null>(null);
 
   const picking = mode.kind === 'feature' && (mode.draft.type === 'fillet' || mode.draft.type === 'chamfer');
-  const facePicking = mode.kind === 'feature' && (mode.draft.type === 'hole' || mode.draft.type === 'shell');
+  const facePicking =
+    mode.kind === 'feature' &&
+    (mode.draft.type === 'hole' || mode.draft.type === 'shell' || ((mode.draft.type === 'extrude' || mode.draft.type === 'cutExtrude') && mode.draft.direction1.type === 'upToFace'));
+  const vertexPicking = mode.kind === 'feature' && (mode.draft.type === 'extrude' || mode.draft.type === 'cutExtrude') && mode.draft.direction1.type === 'upToVertex';
+  const pickedVertex = vertexPicking && 'direction1' in mode.draft && mode.draft.direction1.type === 'upToVertex' ? mode.draft.direction1.vertex : null;
   const measuring = useView((s) => s.measuring) && mode.kind === 'model';
   const shellFaces = mode.kind === 'feature' && mode.draft.type === 'shell' ? mode.draft.faces : [];
   const pickedEdges = mode.kind === 'feature' && 'edges' in mode.draft ? mode.draft.edges : null;
@@ -327,6 +364,8 @@ function Body() {
   }, [mesh, doc, shellFaces]);
 
   if (!g || !mesh) return null;
+  if (faceColors) g.faces.setAttribute('color', faceColors);
+  else if (g.faces.hasAttribute('color')) g.faces.deleteAttribute('color');
   const dim = mode.kind === 'sketch';
   const tol = () => camera.position.distanceTo(controls?.target ?? new THREE.Vector3()) * 0.012;
   const hitNormal = (e: ThreeEvent<PointerEvent | MouseEvent>): Vec3 | null => (e.face ? [e.face.normal.x, e.face.normal.y, e.face.normal.z] : null);
@@ -355,8 +394,25 @@ function Body() {
     return best;
   };
 
+  /** the pickable model corner nearest the cursor, if close enough */
+  const nearestVertex = (p: Vec3): VertexRef | null => {
+    let best: VertexRef | null = null;
+    let bd = tol() * 1.5;
+    const editing = mode.kind === 'feature' ? mode.editingId : undefined;
+    for (const c of candidateVertices(doc, editing)) {
+      const d = Math.hypot(c.at[0] - p[0], c.at[1] - p[1], c.at[2] - p[2]);
+      if (d < bd) (bd = d), (best = c.ref);
+    }
+    return best;
+  };
+
   const onMove = (e: ThreeEvent<PointerEvent>) => {
     if (measuring) return;
+    if (vertexPicking) {
+      e.stopPropagation();
+      setHoverVertex(nearestVertex(P(e)));
+      return;
+    }
     if (facePicking) {
       e.stopPropagation();
       setHoverFace(facePointAt(e)?.face ?? null);
@@ -375,11 +431,19 @@ function Body() {
       useView.getState().addMeasurePoint(snapVertex(P(e)));
       return;
     }
+    if (vertexPicking) {
+      e.stopPropagation();
+      const v = nearestVertex(P(e));
+      if (v) useDoc.getState().setUpToVertex(v);
+      else useDoc.getState().notify('info', 'Click closer to a corner of the model.');
+      return;
+    }
     if (facePicking) {
       e.stopPropagation();
       const fp = facePointAt(e);
       if (!fp) return useDoc.getState().notify('info', 'Only flat faces made by an extrude or cut can be picked for now.');
       if (mode.kind === 'feature' && mode.draft.type === 'hole') useDoc.getState().setHolePoint(fp);
+      else if (mode.kind === 'feature' && 'direction1' in mode.draft) useDoc.getState().setUpToFace(fp.face);
       else useDoc.getState().toggleShellFace(fp);
       return;
     }
@@ -418,14 +482,16 @@ function Body() {
         geometry={g.faces}
         userData={{ solid: true }}
         onPointerMove={onMove}
-        onPointerOut={() => (setHoverFace(null), setHoverEdge(null))}
+        onPointerOut={() => (setHoverFace(null), setHoverEdge(null), setHoverVertex(null))}
         onClick={onClick}
         onDoubleClick={onDouble}
         // (passing undefined would wipe three's raycast method after the first sketch)
         raycast={dim ? noRaycast : THREE.Mesh.prototype.raycast}
       >
         <meshStandardMaterial
-          color={dim ? C['surface-sunken'] : ((C as Record<string, string>)[doc.color ?? ''] ?? C['model-face'])}
+          key={faceColors && !dim ? 'by-feature' : 'plain'}
+          vertexColors={!!faceColors && !dim}
+          color={dim ? C['surface-sunken'] : faceColors ? '#ffffff' : ((C as Record<string, string>)[doc.color ?? ''] ?? C['model-face'])}
           roughness={0.55}
           metalness={0.05}
           polygonOffset
@@ -453,6 +519,16 @@ function Body() {
           <meshBasicMaterial color={C.selected} transparent opacity={0.45} depthWrite={false} side={THREE.DoubleSide} />
         </mesh>
       ))}
+      {vertexPicking &&
+        [pickedVertex && { v: pickedVertex, c: C.selected }, hoverVertex && { v: hoverVertex, c: C.hover }].map((m, i) => {
+          const at = m ? vertexPoint(doc, m.v) : undefined;
+          return at ? (
+            <mesh key={i} position={at} renderOrder={13} raycast={() => null}>
+              <sphereGeometry args={[i ? 1.1 : 0.9, 12, 12]} />
+              <meshBasicMaterial color={m!.c} depthTest={false} />
+            </mesh>
+          ) : null;
+        })}
       {picking && selectedGroups.length > 0 && <EdgeHighlight points={groupPoints(mesh, selectedGroups)} color={C.selected} />}
       {picking && hoverEdge !== null && <EdgeHighlight points={groupPoints(mesh, [hoverEdge])} color={C.hover} />}
     </group>

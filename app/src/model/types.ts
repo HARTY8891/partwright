@@ -94,6 +94,8 @@ interface FeatureBase {
   id: Id;
   name: string;
   suppressed: boolean;
+  /** colour of the faces this feature made, a token name like "part-blue"; none = the part colour */
+  color?: string;
 }
 
 export type PlaneBase = { kind: 'plane'; featureId: Id } | { kind: 'face'; face: FaceRef };
@@ -124,7 +126,14 @@ export type EndCondition =
   | { type: 'blind'; depth: Param }
   | { type: 'midPlane'; depth: Param }
   | { type: 'throughAll'; depth: Param } // depth kept so switching back keeps the value
-  | { type: 'throughAllBoth'; depth: Param };
+  | { type: 'throughAllBoth'; depth: Param }
+  /** up to a flat face of the model (any angle); `depth` kept for switching back */
+  | { type: 'upToFace'; depth: Param; face: FaceRef | null }
+  /** up to a model corner; `depth` holds the resolved distance from the sketch plane */
+  | { type: 'upToVertex'; depth: Param; vertex: VertexRef | null };
+
+/** A corner of the model: where the side edge through a sketch point meets an extrude's start or end cap. */
+export type VertexRef = { kind: 'corner'; featureId: Id; pointId: Id; cap: 'start' | 'end' };
 
 export interface ExtrudeFeature extends FeatureBase {
   type: 'extrude' | 'cutExtrude';
@@ -134,6 +143,8 @@ export interface ExtrudeFeature extends FeatureBase {
   direction2?: { depth: Param };
   /** thin wall: extrude a wall of this thickness along the outline instead of the filled outline */
   thin?: { thickness: Param; side: 'inside' | 'outside' | 'both' };
+  /** taper the sides, in degrees, from the sketch plane; inward unless `outward` */
+  draft?: { angle: Param; outward: boolean };
   reverse: boolean;
   merge: boolean;
 }
@@ -153,6 +164,23 @@ export interface EdgeFeature extends FeatureBase {
   edges: EdgeRef[];
   /** fillet radius or chamfer distance */
   size: Param;
+  /** fillet only: a different radius at the other end of each edge (variable radius) */
+  size2?: Param;
+}
+
+/** A solid blended through two or more closed outlines, in order. */
+export interface LoftFeature extends FeatureBase {
+  type: 'loft';
+  sketchIds: Id[];
+  /** straight sides between the outlines instead of a smooth blend */
+  ruled: boolean;
+}
+
+/** A closed outline (profile sketch) swept along a path (an open chain in another sketch). */
+export interface SweepFeature extends FeatureBase {
+  type: 'sweep';
+  profileId: Id;
+  pathId: Id;
 }
 
 export interface HoleFeature extends FeatureBase {
@@ -200,8 +228,10 @@ export interface MirrorFeature extends FeatureBase {
 
 export type Feature =
   | PlaneFeature | SketchFeature | ExtrudeFeature | RevolveFeature | EdgeFeature
-  | HoleFeature | ShellFeature | PatternFeature | MirrorFeature | ImportFeature;
-export type SolidFeature = ExtrudeFeature | RevolveFeature | EdgeFeature | HoleFeature | ShellFeature | PatternFeature | MirrorFeature | ImportFeature;
+  | HoleFeature | ShellFeature | PatternFeature | MirrorFeature | ImportFeature | LoftFeature | SweepFeature;
+export type SolidFeature =
+  | ExtrudeFeature | RevolveFeature | EdgeFeature | HoleFeature | ShellFeature | PatternFeature | MirrorFeature | ImportFeature
+  | LoftFeature | SweepFeature;
 export type SolidType = SolidFeature['type'];
 
 export interface PartDocument {
@@ -219,6 +249,21 @@ export interface PartDocument {
   material?: string;
   /** part colour, a token name like "part-blue" */
   color?: string;
+  /** named sets of variable values; the active one overrides `variables` */
+  configurations?: Configuration[];
+  /** id of the active configuration; none = the base variables */
+  activeConfig?: Id;
+  /** features suppressed in the base configuration, saved while another configuration is active */
+  baseSuppressed?: Id[];
+}
+
+export interface Configuration {
+  id: Id;
+  name: string;
+  /** variable name -> expression, for the variables this configuration changes */
+  values: Record<string, string>;
+  /** features suppressed in this configuration (saved when switching away); none = as in the base */
+  suppressed?: Id[];
 }
 
 export interface Variable {
@@ -238,7 +283,17 @@ export const SCHEMA_VERSION = 1;
 
 /** Features whose solid can be repeated by a pattern or mirror. */
 export const isSeedType = (t: Feature['type']) =>
-  t === 'extrude' || t === 'cutExtrude' || t === 'revolve' || t === 'cutRevolve' || t === 'hole';
+  t === 'extrude' || t === 'cutExtrude' || t === 'revolve' || t === 'cutRevolve' || t === 'hole' || t === 'loft' || t === 'sweep';
+
+/** The sketches a feature is built from (shown nested under it, deleted and moved with it). */
+export const sketchesOf = (f: Feature): Id[] =>
+  f.type === 'extrude' || f.type === 'cutExtrude' || f.type === 'revolve' || f.type === 'cutRevolve'
+    ? [f.sketchId]
+    : f.type === 'loft'
+      ? f.sketchIds
+      : f.type === 'sweep'
+        ? [f.profileId, f.pathId]
+        : [];
 
 export const usesSketch = (f: Feature): f is ExtrudeFeature | RevolveFeature =>
   f.type === 'extrude' || f.type === 'cutExtrude' || f.type === 'revolve' || f.type === 'cutRevolve';

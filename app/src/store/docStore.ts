@@ -4,12 +4,13 @@ import { create } from 'zustand';
 import { produce, type Draft } from 'immer';
 import type {
   ConstraintKind, Dimension, EdgeRef, Feature, FeatureDraft, Id, PartDocument, PlaneWhich, Pt, Sketch, SketchFeature,
-  SketchSupport, Variable, FacePoint,
+  SketchSupport, Variable, FacePoint, FaceRef, Configuration, VertexRef,
 } from '../model/types';
-import { SCHEMA_VERSION, usesSketch, isSeedType } from '../model/types';
+import { SCHEMA_VERSION, sketchesOf, isSeedType } from '../model/types';
 import { solveSketch, pointOf, type SolveResult } from '../solver/solve';
 import { sameEdge } from '../model/refs';
 import { applyEquations } from '../model/equations';
+import { rawVertexDepth, resolveVertexDepths } from '../model/refs';
 import { polygonShape, slotShape } from '../solver/shapes';
 import { extendLine, filletCorner, mirrorEntities, offsetEntities, trimLine } from '../solver/modify';
 import { useView } from '../viewport/viewStore';
@@ -82,6 +83,14 @@ interface State {
   beginFeature(type: FeatureDraft['type'], sketchId?: Id): void;
   /** hole: place at a picked face point */
   setHolePoint(fp: FacePoint): void;
+  /** extrude up to: the picked face */
+  setUpToFace(face: FaceRef): void;
+  /** extrude up to: the picked model corner (also sets the direction towards it) */
+  setUpToVertex(v: VertexRef): void;
+  /** colour of the faces a feature made; undefined = the part colour */
+  setFeatureColor(id: Id, color: string | undefined): void;
+  setConfigurations(configs: Configuration[], active?: Id): void;
+  setActiveConfig(id: Id | undefined): void;
   /** shell: add or remove a face to open */
   toggleShellFace(fp: FacePoint): void;
   /** pattern / mirror: add or remove a feature to repeat */
@@ -120,6 +129,7 @@ export function makeDoc(units: Units = 'mm'): PartDocument {
 const BASE_NAMES: Record<FeatureDraft['type'], string> = {
   extrude: 'Extrude', cutExtrude: 'Cut', revolve: 'Revolve', cutRevolve: 'CutRevolve', fillet: 'Fillet', chamfer: 'Chamfer',
   hole: 'Hole', shell: 'Shell', linearPattern: 'LPattern', circularPattern: 'CPattern', mirror: 'Mirror', plane: 'Plane', import: 'Import',
+  loft: 'Loft', sweep: 'Sweep',
 };
 
 /** Insert a new feature at the rollback bar and move the bar past it. */
@@ -140,13 +150,13 @@ export const getSketch = (doc: PartDocument, id: Id) =>
 
 /** Sketches already used by a feature (shown nested under it in the tree). */
 export function consumedSketches(doc: PartDocument): Set<Id> {
-  return new Set(doc.features.flatMap((f) => (usesSketch(f) ? [f.sketchId] : [])));
+  return new Set(doc.features.flatMap((f) => sketchesOf(f)));
 }
 
 /** Features that depend directly on feature `id`. */
 export function directDependents(doc: PartDocument, id: Id): Feature[] {
   return doc.features.filter((x) => {
-    if (usesSketch(x) && x.sketchId === id) return true;
+    if (sketchesOf(x).includes(id)) return true;
     if (x.type === 'sketch') return x.on.kind === 'plane' ? x.on.featureId === id : x.on.face.featureId === id;
     if (x.type === 'fillet' || x.type === 'chamfer') return x.edges.some((e) => e.featureId === id);
     if (x.type === 'linearPattern' || x.type === 'circularPattern') return x.seeds.includes(id);
@@ -180,15 +190,35 @@ function circleThrough(a: Pt, b: Pt, c: Pt): { center: Pt; r: number } | null {
   return { center, r: Math.hypot(a.x - center.x, a.y - center.y) };
 }
 
+/**
+ * Make another configuration active. Suppression is per configuration: the
+ * current suppressed features are saved into the one being left, and the new
+ * one's list (or the base list, if it has none yet) is applied.
+ */
+function switchConfig(d: Draft<PartDocument>, to: Id | undefined) {
+  const from = d.activeConfig;
+  const into = d.configurations?.find((c) => c.id === to);
+  if (from === (into ? to : undefined)) return;
+  const now = d.features.filter((f) => f.suppressed).map((f) => f.id);
+  const out = d.configurations?.find((c) => c.id === from);
+  if (out) out.suppressed = now;
+  else if (!from) d.baseSuppressed = now;
+  const list = new Set(into ? (into.suppressed ?? d.baseSuppressed ?? now) : (d.baseSuppressed ?? now));
+  for (const f of d.features) if (f.type !== 'plane') f.suppressed = list.has(f.id);
+  d.activeConfig = into ? to : undefined;
+}
+
 export const useDoc = create<State>((set, get) => {
   /** Apply a document change as one undoable step. */
   const commit = (recipe: (d: Draft<PartDocument>) => void, extra: Partial<State> = {}) => {
     const prev = get().doc;
-    const next = applyEquations(
-      produce(prev, (d) => {
-        recipe(d);
-        d.updatedAt = new Date().toISOString();
-      }),
+    const next = resolveVertexDepths(
+      applyEquations(
+        produce(prev, (d) => {
+          recipe(d);
+          d.updatedAt = new Date().toISOString();
+        }),
+      ),
     );
     set({ doc: next, past: [...get().past.slice(-99), prev], future: [], dirty: true, ...extra });
   };
@@ -304,8 +334,8 @@ export const useDoc = create<State>((set, get) => {
       if (!f || f.type === 'plane') return;
       const remove = new Set([id, ...dependentsOf(doc, id)]);
       // Deleting a feature also deletes the sketch it used.
-      if (usesSketch(f)) remove.add(f.sketchId);
-      const also = doc.features.filter((x) => remove.has(x.id) && x.id !== id && !(usesSketch(f) && x.id === f.sketchId));
+      for (const sk of sketchesOf(f)) remove.add(sk);
+      const also = doc.features.filter((x) => remove.has(x.id) && x.id !== id && !sketchesOf(f).includes(x.id));
       commit((d) => {
         const before = d.features.slice(0, d.rollbackIndex).filter((x) => remove.has(x.id)).length;
         d.rollbackIndex = Math.max(3, d.rollbackIndex - before);
@@ -697,6 +727,18 @@ export const useDoc = create<State>((set, get) => {
         get().notify('info', 'Use File ▸ Import STEP to bring in a solid.');
         return;
       }
+      if (type === 'loft' || type === 'sweep') {
+        // sketches not yet used by another feature, in history order
+        const used = consumedSketches(doc0);
+        const free = doc0.features.slice(0, doc0.rollbackIndex).filter((f) => f.type === 'sketch' && !used.has(f.id)).map((f) => f.id);
+        if (free.length < 2) {
+          get().notify('info', type === 'loft' ? 'A loft needs two or more sketches with closed outlines.' : 'A sweep needs two sketches: an outline (profile) and a path.');
+          return;
+        }
+        draft = type === 'loft' ? { type, sketchIds: free.slice(-2), ruled: false } : { type, profileId: free[free.length - 2], pathId: free[free.length - 1] };
+        set({ mode: { kind: 'feature', draft } });
+        return;
+      }
       if (type === 'fillet' || type === 'chamfer') {
         if (!useDoc.getState().doc.features.some((f) => f.type === 'extrude' || f.type === 'revolve' || f.type === 'import')) {
           get().notify('info', 'Make a solid first.');
@@ -755,6 +797,30 @@ export const useDoc = create<State>((set, get) => {
         insertAtRollback(d, { ...m.draft, id, name, suppressed: false } as Draft<Feature>);
       }, { mode: { kind: 'model' }, selection: id });
     },
+    setUpToFace: (face) =>
+      get().updateDraft((d) => void ('direction1' in d && d.direction1.type === 'upToFace' && (d.direction1.face = face as Draft<FaceRef>))),
+    setUpToVertex: (v) => {
+      const m = get().mode;
+      if (m.kind !== 'feature' || (m.draft.type !== 'extrude' && m.draft.type !== 'cutExtrude')) return;
+      const raw = rawVertexDepth(get().doc, { ...m.draft, direction1: { type: 'upToVertex', depth: m.draft.direction1.depth, vertex: v } });
+      get().updateDraft((d) => {
+        if (!('direction1' in d) || d.direction1.type !== 'upToVertex') return;
+        d.direction1.vertex = v as Draft<VertexRef>;
+        if (raw !== undefined && Math.abs(raw) > 1e-9) d.reverse = raw < 0;
+      });
+    },
+    setFeatureColor: (id, color) =>
+      commit((d) => {
+        const f = d.features.find((x) => x.id === id);
+        if (f) f.color = color;
+      }),
+    setConfigurations: (configs, active) =>
+      commit((d) => {
+        // keep each configuration's saved suppression list
+        d.configurations = configs.map((c) => ({ ...c, suppressed: c.suppressed ?? d.configurations?.find((o) => o.id === c.id)?.suppressed })) as Draft<Configuration>[];
+        switchConfig(d, configs.some((c) => c.id === active) ? active : undefined);
+      }),
+    setActiveConfig: (id) => commit((d) => switchConfig(d, id)),
     setHolePoint: (fp) => get().updateDraft((d) => void (d.type === 'hole' && (d.at = fp as Draft<FacePoint>))),
     toggleShellFace: (fp) =>
       get().updateDraft((d) => {
@@ -782,7 +848,7 @@ export const useDoc = create<State>((set, get) => {
       const f = doc.features.find((x) => x.id === id);
       if (!f || f.type === 'plane' && f.def.type === 'default') return false;
       // the block that moves: a sketch-based feature takes its sketch along
-      const block = usesSketch(f) ? [f.sketchId, f.id] : [f.id];
+      const block = [...sketchesOf(f), f.id];
       const rest = doc.features.filter((x) => !block.includes(x.id));
       const target = doc.features[toIndex];
       let at = target ? rest.indexOf(target) : rest.length;

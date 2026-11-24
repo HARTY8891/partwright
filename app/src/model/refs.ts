@@ -4,8 +4,9 @@
 // such as changing a depth or a sketch dimension. Pure: no kernel, used on both threads.
 
 import type {
-  EdgeRef, ExtrudeFeature, FaceRef, Feature, Id, PartDocument, Pt, Sketch, SketchFeature,
+  EdgeRef, ExtrudeFeature, FaceRef, Feature, Id, PartDocument, Pt, Sketch, SketchFeature, VertexRef,
 } from './types';
+import { produce } from 'immer';
 import { add, cross, dot, frameForSketch, makeFrame, neg, norm, scale, sub, toWorld, type Frame, type Vec3 } from './planes';
 import { bezierAt, sampleSpline, splineSpans } from './spline';
 
@@ -34,6 +35,12 @@ export function extrudeExtent(f: Pick<ExtrudeFeature, 'direction1' | 'reverse'> 
       return s > 0 ? [0, THROUGH_ALL] : [-THROUGH_ALL, 0];
     case 'throughAllBoth':
       return [-THROUGH_ALL, THROUGH_ALL];
+    case 'upToFace':
+      // the far end is trimmed by the face; for naming, treat it like through-all
+      return s > 0 ? [0, THROUGH_ALL] : [-THROUGH_ALL, 0];
+    case 'upToVertex':
+      // depth is resolved from the vertex (resolveVertexDepths)
+      return s > 0 ? [0, d] : [-d, 0];
   }
 }
 
@@ -272,4 +279,82 @@ export function edgeLabel(doc: PartDocument, ref: EdgeRef): string {
 export function faceLabel(doc: PartDocument, ref: FaceRef): string {
   const f = doc.features.find((x) => x.id === ref.featureId);
   return `${f?.name ?? '?'} ${ref.kind === 'cap' ? `${ref.cap} face` : 'side face'}`;
+}
+
+/* ---------- vertices (extrude up to a vertex) ---------- */
+
+/** Where a model corner is now. */
+export function vertexPoint(doc: PartDocument, ref: VertexRef): Vec3 | undefined {
+  const ex = getExtrude(doc, ref.featureId);
+  if (!ex || ex.suppressed) return undefined;
+  const base = frameForSketch(doc, ex.sketchId);
+  const sk = getSketchFeature(doc, ex.sketchId);
+  if (!base || !sk || !sk.sketch.entities.some((e) => e.id === ref.pointId)) return undefined;
+  const [a, b] = extrudeExtent(ex);
+  return toWorld(base, pointOf(sk.sketch, ref.pointId), ref.cap === 'start' ? a : b);
+}
+
+const onOutline = (sk: Sketch, id: Id) =>
+  sk.entities.some(
+    (l) =>
+      !l.construction &&
+      ((l.kind === 'line' && (l.p1 === id || l.p2 === id)) ||
+        (l.kind === 'arc' && (l.start === id || l.end === id)) ||
+        (l.kind === 'spline' && (l.points[0] === id || l.points[l.points.length - 1] === id))),
+  );
+
+/** Every corner that can be picked: the ends of the side edges of each extrude. */
+export function candidateVertices(doc: PartDocument, except?: Id): { ref: VertexRef; at: Vec3 }[] {
+  const out: { ref: VertexRef; at: Vec3 }[] = [];
+  for (const ex of solidFeatures(doc)) {
+    if (ex.id === except || ex.direction1.type === 'throughAll' || ex.direction1.type === 'throughAllBoth' || ex.direction1.type === 'upToFace') continue;
+    const sk = getSketchFeature(doc, ex.sketchId);
+    if (!sk) continue;
+    for (const e of sk.sketch.entities) {
+      if (e.kind !== 'point' || e.construction || !onOutline(sk.sketch, e.id)) continue;
+      for (const cap of ['start', 'end'] as const) {
+        const ref: VertexRef = { kind: 'corner', featureId: ex.id, pointId: e.id, cap };
+        const at = vertexPoint(doc, ref);
+        if (at) out.push({ ref, at });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Signed distance from an extrude's sketch plane to its vertex, along the
+ * direction the extrude goes before `reverse` (cuts go against the normal).
+ */
+export function rawVertexDepth(doc: PartDocument, f: Pick<ExtrudeFeature, 'type' | 'sketchId' | 'direction1'>): number | undefined {
+  if (f.direction1.type !== 'upToVertex' || !f.direction1.vertex) return undefined;
+  const frame = frameForSketch(doc, f.sketchId);
+  const v = vertexPoint(doc, f.direction1.vertex);
+  if (!frame || !v) return undefined;
+  return dot(sub(v, frame.origin), frame.normal) * (f.type === 'cutExtrude' ? -1 : 1);
+}
+
+/** The depth an up-to-vertex extrude goes to, with `reverse` applied (positive = in front). */
+export function vertexDepth(doc: PartDocument, f: Pick<ExtrudeFeature, 'type' | 'sketchId' | 'direction1' | 'reverse'>): number | undefined {
+  const raw = rawVertexDepth(doc, f);
+  return raw === undefined ? undefined : raw * (f.reverse ? -1 : 1);
+}
+
+export function vertexLabel(doc: PartDocument, ref: VertexRef): string {
+  const f = doc.features.find((x) => x.id === ref.featureId);
+  return `Corner of ${f?.name ?? 'a deleted feature'} (${ref.cap === 'start' ? 'start' : 'end'})`;
+}
+
+/** Store each up-to-vertex extrude's depth, in history order, so later naming sees the real ends. */
+export function resolveVertexDepths(doc: PartDocument): PartDocument {
+  if (!doc.features.some((f) => (f.type === 'extrude' || f.type === 'cutExtrude') && f.direction1.type === 'upToVertex')) return doc;
+  return produce(doc, (d) => {
+    for (const f of d.features) {
+      if ((f.type !== 'extrude' && f.type !== 'cutExtrude') || f.direction1.type !== 'upToVertex') continue;
+      const depth = vertexDepth(d as PartDocument, f as ExtrudeFeature);
+      if (depth === undefined) continue;
+      const value = Math.round(depth * 1e9) / 1e9;
+      if (f.direction1.depth.value !== value) f.direction1.depth = { expr: String(Math.round(value * 1e4) / 1e4), value };
+    }
+  });
 }

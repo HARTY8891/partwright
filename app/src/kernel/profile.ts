@@ -114,3 +114,42 @@ export function nestLoops<T extends { poly: Pt[] }>(loops: T[]): { outer: T; hol
   }
   return groups;
 }
+
+/**
+ * A sweep path: the sketch's solid curves joined end to end into one open chain
+ * (or a closed loop). Returns the start point and the steps along it.
+ */
+export function sketchPath(sk: Sketch): { start: Pt; steps: Step[]; closed: boolean } | { error: string } {
+  const segs = sk.entities.filter(
+    (e): e is Extract<Sketch['entities'][number], { kind: 'line' | 'arc' | 'spline' }> =>
+      (e.kind === 'line' || e.kind === 'arc' || e.kind === 'spline') && !e.construction,
+  );
+  if (!segs.length) return { error: 'The path sketch has no lines or curves.' };
+  const ends = (s: (typeof segs)[number]): [Id, Id] =>
+    s.kind === 'line' ? [s.p1, s.p2] : s.kind === 'arc' ? [s.start, s.end] : [s.points[0], s.points[s.points.length - 1]];
+  const deg = new Map<Id, number>();
+  for (const s of segs) for (const p of ends(s)) deg.set(p, (deg.get(p) ?? 0) + 1);
+  if ([...deg.values()].some((d) => d > 2)) return { error: 'The path branches. A sweep path must be one chain of lines and curves.' };
+  const loose = [...deg.entries()].filter(([, d]) => d === 1).map(([p]) => p);
+  if (loose.length !== 0 && loose.length !== 2) return { error: 'The path must be one connected chain.' };
+  let at = loose[0] ?? ends(segs[0])[0];
+  const startId = at;
+  const used = new Set<Id>();
+  const steps: Step[] = [];
+  while (used.size < segs.length) {
+    const seg = segs.find((s) => !used.has(s.id) && ends(s).includes(at));
+    if (!seg) return { error: 'The path must be one connected chain.' };
+    used.add(seg.id);
+    const [u, v] = ends(seg);
+    const next = at === u ? v : u;
+    const to = pointOf(sk, next);
+    if (seg.kind === 'line') steps.push({ kind: 'line', to });
+    else if (seg.kind === 'arc') steps.push({ kind: 'arc', to, mid: arcMid(sk, seg) });
+    else {
+      const fwd = splineSpans(seg.points.map((id) => pointOf(sk, id)));
+      steps.push({ kind: 'bezier', to, spans: at === seg.points[0] ? fwd : reverseSpans(fwd) });
+    }
+    at = next;
+  }
+  return { start: pointOf(sk, startId), steps, closed: loose.length === 0 };
+}

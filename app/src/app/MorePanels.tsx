@@ -11,7 +11,7 @@ import { useDoc } from '../store/docStore';
 import { useKernel } from '../store/rebuild';
 import { kernel } from '../kernel/client';
 import { useView } from '../viewport/viewStore';
-import { faceLabel } from '../model/refs';
+import { faceLabel, vertexLabel } from '../model/refs';
 import { docVars, evalVariables, NAME_RE } from '../model/equations';
 import { isSeedType, type FeatureDraft, type Variable } from '../model/types';
 import { unitLabel } from '../model/units';
@@ -117,6 +117,66 @@ export function MoreFeatureOptions({ draft }: { draft: D }) {
     );
   }
 
+  if (draft.type === 'loft' || draft.type === 'sweep') {
+    const used = new Set(doc.features.flatMap((f) => (f.type === 'loft' || f.type === 'sweep' || 'sketchId' in f ? (f.type === 'loft' ? f.sketchIds : f.type === 'sweep' ? [f.profileId, f.pathId] : [(f as { sketchId: string }).sketchId]) : [])));
+    const sketches = doc.features.slice(0, doc.rollbackIndex).filter((f) => f.type === 'sketch' && (!used.has(f.id) || (draft.type === 'loft' ? draft.sketchIds.includes(f.id) : [draft.profileId, draft.pathId].includes(f.id))));
+    if (draft.type === 'sweep')
+      return (
+        <PanelSection title="Profile and path">
+          <Select label="Profile (closed outline)" value={draft.profileId} onChange={(v) => s.updateDraft((d) => void (d.type === 'sweep' && (d.profileId = v)))} options={sketches.map((f) => ({ value: f.id, label: f.name }))} />
+          <Select label="Path (open chain)" value={draft.pathId} onChange={(v) => s.updateDraft((d) => void (d.type === 'sweep' && (d.pathId = v)))} options={sketches.map((f) => ({ value: f.id, label: f.name }))} />
+          <p className="text-2xs text-text-muted">Draw the profile at the start of the path, on a plane square to it.</p>
+        </PanelSection>
+      );
+    return (
+      <PanelSection title="Outlines, in order">
+        {sketches.map((f) => (
+          <Checkbox
+            key={f.id}
+            label={draft.sketchIds.includes(f.id) ? `${draft.sketchIds.indexOf(f.id) + 1}. ${f.name}` : f.name}
+            checked={draft.sketchIds.includes(f.id)}
+            onChange={(v) =>
+              s.updateDraft((d) => {
+                if (d.type !== 'loft') return;
+                d.sketchIds = v ? [...d.sketchIds, f.id] : d.sketchIds.filter((x) => x !== f.id);
+              })
+            }
+          />
+        ))}
+        <p className="text-2xs text-text-muted">The loft goes through the ticked outlines in the order you tick them.</p>
+        <Checkbox label="Straight sides (ruled)" checked={draft.ruled} onChange={(v) => s.updateDraft((d) => void (d.type === 'loft' && (d.ruled = v)))} />
+      </PanelSection>
+    );
+  }
+
+  if ((draft.type === 'extrude' || draft.type === 'cutExtrude') && draft.direction1.type === 'upToFace') {
+    return (
+      <PanelSection title="Up to">
+        <SelectionBox
+          label="Face"
+          prompt="Click the flat face to stop at"
+          focused
+          items={draft.direction1.face ? [faceLabel(doc, draft.direction1.face)] : []}
+          onRemove={() => s.updateDraft((d) => void ('direction1' in d && d.direction1.type === 'upToFace' && (d.direction1.face = null)))}
+        />
+      </PanelSection>
+    );
+  }
+
+  if ((draft.type === 'extrude' || draft.type === 'cutExtrude') && draft.direction1.type === 'upToVertex') {
+    return (
+      <PanelSection title="Up to">
+        <SelectionBox
+          label="Corner"
+          prompt="Click near a corner of the model"
+          focused
+          items={draft.direction1.vertex ? [vertexLabel(doc, draft.direction1.vertex)] : []}
+          onRemove={() => s.updateDraft((d) => void ('direction1' in d && d.direction1.type === 'upToVertex' && (d.direction1.vertex = null)))}
+        />
+      </PanelSection>
+    );
+  }
+
   if (draft.type === 'plane') {
     const def = draft.def;
     const baseName = def.base.kind === 'face' ? faceLabel(doc, def.base.face) : doc.features.find((f) => f.id === (def.base as { featureId: string }).featureId)?.name;
@@ -180,6 +240,9 @@ export function needsPick(d: D): string | null {
   if (d.type === 'hole') return d.at ? null : 'Click a flat face where the hole should start.';
   if (d.type === 'shell') return d.faces.length ? null : 'Click the faces to open. The rest becomes a wall.';
   if (d.type === 'linearPattern' || d.type === 'circularPattern' || d.type === 'mirror') return d.seeds.length ? null : 'Tick the features to repeat.';
+  if ((d.type === 'extrude' || d.type === 'cutExtrude') && d.direction1.type === 'upToFace' && !d.direction1.face) return 'Click the flat face to extrude up to.';
+  if ((d.type === 'extrude' || d.type === 'cutExtrude') && d.direction1.type === 'upToVertex' && !d.direction1.vertex) return 'Click near a corner of the model to extrude up to.';
+  if (d.type === 'loft' && d.sketchIds.length < 2) return 'Tick two or more sketches, in order.';
   return null;
 }
 
@@ -214,10 +277,11 @@ export function SecondDirection({ draft }: { draft: D }) {
 
 /* ---------- dialogs: equations, mass ---------- */
 
-export const useToolDialogs = create<{ equations: boolean; mass: boolean; options: boolean; set(p: Partial<{ equations: boolean; mass: boolean; options: boolean }>): void }>((set) => ({
+export const useToolDialogs = create<{ equations: boolean; mass: boolean; options: boolean; configs: boolean; set(p: Partial<{ equations: boolean; mass: boolean; options: boolean; configs: boolean }>): void }>((set) => ({
   equations: false,
   mass: false,
   options: false,
+  configs: false,
   set: (p) => set(p),
 }));
 
@@ -496,6 +560,55 @@ export function ThinWall({ draft }: { draft: D }) {
   );
 }
 
+/* ---------- draft (extrude) ---------- */
+
+export function DraftOption({ draft }: { draft: D }) {
+  const doc = useDoc((s) => s.doc);
+  const s = useDoc.getState();
+  if (draft.type !== 'extrude' && draft.type !== 'cutExtrude') return null;
+  const on = !!draft.draft;
+  return (
+    <PanelSection
+      title="Draft"
+      toggle={{
+        checked: on,
+        onChange: (v) => s.updateDraft((d) => void ('direction1' in d && (d.draft = v ? { angle: { expr: '3', value: 3 }, outward: false } : undefined))),
+      }}
+    >
+      {on && (
+        <>
+          <NumberField
+            label="Draft angle"
+            unit="°"
+            vars={docVars(doc)}
+            min={0.001}
+            value={draft.draft!.angle.expr}
+            onCommit={(expr, value) => s.updateDraft((d) => void ('draft' in d && d.draft && (d.draft.angle = { expr, value })))}
+          />
+          <Checkbox label="Draft outward" checked={draft.draft!.outward} onChange={(v) => s.updateDraft((d) => void ('draft' in d && d.draft && (d.draft.outward = v)))} />
+        </>
+      )}
+    </PanelSection>
+  );
+}
+
+/* ---------- face colour (per feature) ---------- */
+
+export function FaceColour({ draft }: { draft: D }) {
+  const s = useDoc.getState();
+  if (draft.type !== 'extrude' && draft.type !== 'cutExtrude') return null;
+  return (
+    <PanelSection title="Appearance">
+      <Select
+        label="Colour of its faces"
+        value={draft.color ?? ''}
+        onChange={(v) => s.updateDraft((d) => void (d.color = v || undefined))}
+        options={[{ value: '', label: 'Same as the part' }, ...PART_COLORS.map((c) => ({ value: c.id, label: c.label }))]}
+      />
+    </PanelSection>
+  );
+}
+
 /* ---------- options (S20) ---------- */
 
 export function OptionsDialog() {
@@ -558,6 +671,129 @@ export function OptionsDialog() {
           />
         </section>
       </div>
+    </Modal>
+  );
+}
+
+/* ---------- configurations ---------- */
+
+/** Pick the active configuration (variants of one part, driven by variables). */
+export function ConfigPicker() {
+  const doc = useDoc((s) => s.doc);
+  const configs = doc.configurations ?? [];
+  if (!doc.variables?.length && !configs.length) return null;
+  return (
+    <div className="flex items-end gap-2 px-4 py-3 border-b border-border">
+      <div className="flex-1">
+        <Select
+          label="Configuration"
+          value={doc.activeConfig ?? ''}
+          onChange={(v) => useDoc.getState().setActiveConfig(v || undefined)}
+          options={[{ value: '', label: 'Base values' }, ...configs.map((c) => ({ value: c.id, label: c.name }))]}
+        />
+      </div>
+      <Button size="sm" onClick={() => useToolDialogs.getState().set({ configs: true })}>
+        Edit…
+      </Button>
+    </div>
+  );
+}
+
+export function ConfigurationsDialog() {
+  const open = useToolDialogs((d) => d.configs);
+  const doc = useDoc((s) => s.doc);
+  const [rows, setRows] = useState(doc.configurations ?? []);
+  useEffect(() => {
+    if (open) setRows(JSON.parse(JSON.stringify(doc.configurations ?? [])));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+  const vars = doc.variables ?? [];
+  const close = () => useToolDialogs.getState().set({ configs: false });
+  const apply = () => {
+    useDoc.getState().setConfigurations(rows, doc.activeConfig);
+    close();
+  };
+  return (
+    <Modal
+      open={open}
+      onOpenChange={(v) => !v && close()}
+      title="Configurations"
+      size="lg"
+      footer={
+        <>
+          <Button onClick={close}>Cancel</Button>
+          <Button variant="primary" onClick={apply}>Apply</Button>
+        </>
+      }
+    >
+      <p className="text-xs text-text-muted mb-6">
+        A configuration is a named set of variable values, for example a short and a long version of the same bracket. Leave a cell empty to use the base value. Features you suppress while a configuration is active stay suppressed in that configuration only.
+      </p>
+      {vars.length === 0 ? (
+        <p className="text-text-muted">Add variables in Equations first; configurations change their values.</p>
+      ) : (
+        <div className="overflow-auto">
+          <table className="text-sm">
+            <thead>
+              <tr className="text-left text-2xs uppercase tracking-wide text-text-muted">
+                <th className="pb-2 pr-4 font-semibold">Variable</th>
+                <th className="pb-2 pr-4 font-semibold">Base</th>
+                {rows.map((c, j) => (
+                  <th key={c.id} className="pb-2 pr-4 font-semibold">
+                    <div className="flex items-center gap-1">
+                      <input
+                        aria-label={`Name of configuration ${j + 1}`}
+                        value={c.name}
+                        onChange={(e) => setRows(rows.map((r, k) => (k === j ? { ...r, name: e.target.value } : r)))}
+                        className="w-60 h-12 px-2 rounded-sm border border-border-input bg-bg normal-case text-sm font-normal text-text"
+                      />
+                      <IconButton size="sm" label={`Delete ${c.name}`} tone="danger" onClick={() => setRows(rows.filter((_, k) => k !== j))}>
+                        <Trash2 size={12} />
+                      </IconButton>
+                    </div>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {vars.map((v) => (
+                <tr key={v.id}>
+                  <td className="pr-4 py-1 font-mono">{v.name}</td>
+                  <td className="pr-4 py-1 font-mono text-text-muted">{v.expression}</td>
+                  {rows.map((c, j) => (
+                    <td key={c.id} className="pr-4 py-1">
+                      <input
+                        aria-label={`${v.name} in ${c.name}`}
+                        value={c.values[v.name] ?? ''}
+                        placeholder={v.expression}
+                        onChange={(e) =>
+                          setRows(rows.map((r, k) => {
+                            if (k !== j) return r;
+                            const values = { ...r.values };
+                            if (e.target.value.trim()) values[v.name] = e.target.value;
+                            else delete values[v.name];
+                            return { ...r, values };
+                          }))
+                        }
+                        className="w-60 h-12 px-2 rounded-sm border border-border-input bg-bg font-mono"
+                      />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <Button
+        className="mt-6"
+        size="sm"
+        icon={<Plus size={14} />}
+        disabled={vars.length === 0}
+        onClick={() => setRows([...rows, { id: crypto.randomUUID(), name: `Config ${rows.length + 1}`, values: {} }])}
+      >
+        Add configuration
+      </Button>
     </Modal>
   );
 }

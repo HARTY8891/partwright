@@ -4,12 +4,12 @@
 import { expose, transfer } from 'comlink';
 import opencascade from 'replicad-opencascadejs';
 import wasmUrl from 'replicad-opencascadejs/wasm?url';
-import { draw, drawCircle, EdgeFinder, importSTEP, FaceFinder, measureArea, measureShapeVolumeProperties, measureVolume, Plane, setOC, type Drawing, type Shape3D } from 'replicad';
+import { draw, drawCircle, drawRectangle, EdgeFinder, genericSweep, importSTEP, FaceFinder, measureArea, measureShapeVolumeProperties, measureVolume, Plane, setOC, type Drawing, type Shape3D } from 'replicad';
 import type { EdgeRef, FeatureDraft, PartDocument, PatternAxis, SketchFeature } from '../model/types';
 import { isSeedType } from '../model/types';
-import { frameForSketch, planeById, planeFrame, add, neg, scale, toWorld, sub, type Vec3 } from '../model/planes';
-import { edgeLabel, edgePoint, extrudeExtent, facePointWorld, faceFrame, faceLabel, getSketchFeature, pointOf, THROUGH_ALL } from '../model/refs';
-import { nestLoops, sketchLoops, type Loop } from './profile';
+import { frameForSketch, planeById, planeFrame, add, dot, neg, scale, toWorld, sub, type Vec3 } from '../model/planes';
+import { edgeLabel, edgePoint, extrudeExtent, facePointWorld, faceFrame, faceLabel, getSketchFeature, pointOf, THROUGH_ALL, vertexDepth, vertexLabel } from '../model/refs';
+import { nestLoops, sketchLoops, sketchPath, type Loop } from './profile';
 
 export interface FeatureStatus {
   id: string;
@@ -27,6 +27,8 @@ export interface MeshData {
   edges: Float32Array;
   /** per model edge: first vertex index into `edges` (xyz triples) and vertex count */
   edgeGroups: Uint32Array;
+  /** per model face: first index into `triangles` and index count */
+  faceGroups: Uint32Array;
 }
 export interface RebuildResult {
   ms: number;
@@ -119,10 +121,19 @@ function toolOf(doc: PartDocument, f: FeatureDraft): Tool {
     case 'extrude':
     case 'cutExtrude': {
       const sk = sketchOf(doc, f.sketchId);
-      if (f.direction1.type !== 'throughAll' && f.direction1.type !== 'throughAllBoth' && !(f.direction1.depth.value > 0))
+      let vd: number | undefined;
+      if (f.direction1.type === 'upToVertex') {
+        if (!f.direction1.vertex) throw new Error('Click a corner of the model to extrude up to.');
+        const d = vertexDepth(doc, f);
+        if (d === undefined) throw new Error(`${vertexLabel(doc, f.direction1.vertex)} no longer exists. Pick the corner again.`);
+        if (Math.abs(d) < 1e-6) throw new Error('That corner is on the sketch plane. Pick another corner.');
+        if (d < 0) throw new Error('That corner is behind the sketch. Reverse the direction or pick another corner.');
+        vd = d;
+      }
+      if (f.direction1.type !== 'throughAll' && f.direction1.type !== 'throughAllBoth' && f.direction1.type !== 'upToVertex' && !(f.direction1.depth.value > 0))
         throw new Error('Depth must be more than zero.');
       if (f.direction2 && !(f.direction2.depth.value > 0)) throw new Error('The second depth must be more than zero.');
-      const [a, b] = extrudeExtent(f);
+      const [a, b] = extrudeExtent(vd === undefined ? f : { ...f, direction1: { type: 'blind', depth: { expr: String(vd), value: vd } } });
       let drawing = profileDrawing(sk);
       if (f.thin) {
         const t = f.thin.thickness.value;
@@ -135,7 +146,34 @@ function toolOf(doc: PartDocument, f: FeatureDraft): Tool {
           throw new Error('The thin wall could not be built. Try a thinner wall.');
         }
       }
-      const solid = drawing.sketchOnPlane(planeFor(doc, sk, a)).extrude(b - a) as Shape3D;
+      let solid = drawing.sketchOnPlane(planeFor(doc, sk, a)).extrude(b - a) as Shape3D;
+      if (f.draft && f.draft.angle.value !== 0) {
+        const ang = f.draft.angle.value;
+        if (f.direction1.type === 'throughAll' || f.direction1.type === 'throughAllBoth')
+          throw new Error('A draft needs an end: use a fixed depth, up to a face or up to a corner.');
+        if (!(Math.abs(ang) < 89)) throw new Error('The draft angle must be less than 89 degrees.');
+        // neutral plane: the sketch plane, its normal pointing the way the extrude goes
+        const frame = frameForSketch(doc, sk.id)!;
+        const dir = b > -a ? frame.normal : neg(frame.normal);
+        const neutral = new Plane(frame.origin, frame.xDir, dir);
+        try {
+          solid = solid.draft(f.draft.outward ? -ang : ang, (ff) => ff.not((x) => x.parallelTo(neutral)), neutral);
+        } catch {
+          throw new Error('The draft could not be applied. Drafts work on straight and round sides; try a smaller angle.');
+        }
+      }
+      if (f.direction1.type === 'upToFace') {
+        if (!f.direction1.face) throw new Error('Click the flat face to extrude up to.');
+        const ff = faceFrame(doc, f.direction1.face);
+        if (!ff) throw new Error(`${faceLabel(doc, f.direction1.face)} no longer exists. Pick the face again.`);
+        // a huge block on the far side of the face's plane (away from the sketch) is cut off
+        const skf = frameForSketch(doc, sk.id)!;
+        const away = dot(sub(ff.origin, skf.origin), ff.normal) >= 0 ? ff.normal : neg(ff.normal);
+        const plane = new Plane(ff.origin, ff.xDir, away);
+        const block = drawRectangle(4 * THROUGH_ALL, 4 * THROUGH_ALL).sketchOnPlane(plane).extrude(THROUGH_ALL) as Shape3D;
+        solid = solid.cut(block) as Shape3D;
+        if (measureVolume(solid) < 1e-9) throw new Error('The face is behind the sketch. Reverse the direction or pick another face.');
+      }
       return { solid, cut: f.type === 'cutExtrude' };
     }
     case 'revolve':
@@ -166,6 +204,45 @@ function toolOf(doc: PartDocument, f: FeatureDraft): Tool {
       const plane = new Plane(centre, frame.xDir, neg(frame.normal));
       return { solid: drawCircle(d / 2).sketchOnPlane(plane).extrude(depth) as Shape3D, cut: true };
     }
+    case 'loft': {
+      if (f.sketchIds.length < 2) throw new Error('Tick at least two sketches to loft between.');
+      const sketches = f.sketchIds.map((id) => {
+        const sk = sketchOf(doc, id);
+        const { loops, error } = sketchLoops(sk.sketch);
+        if (error) throw new Error(`${sk.name}: ${error}`);
+        if (loops.length !== 1) throw new Error(`${sk.name} must be one closed outline (no holes) to loft.`);
+        return loopDrawing(loops[0]).sketchOnPlane(planeFor(doc, sk));
+      });
+      try {
+        const [first, ...rest] = sketches as unknown as { loftWith(o: unknown[], c: { ruled: boolean }): Shape3D }[];
+        return { solid: first.loftWith(rest, { ruled: f.ruled }), cut: false };
+      } catch {
+        throw new Error('The loft could not be built. Check the outlines are in order and do not cross.');
+      }
+    }
+    case 'sweep': {
+      const prof = sketchOf(doc, f.profileId);
+      const path = sketchOf(doc, f.pathId);
+      if (prof.id === path.id) throw new Error('The profile and the path must be different sketches.');
+      const { loops, error } = sketchLoops(prof.sketch);
+      if (error) throw new Error(`${prof.name}: ${error}`);
+      if (loops.length !== 1) throw new Error(`${prof.name} must be one closed outline (no holes) to sweep.`);
+      const chain = sketchPath(path.sketch);
+      if ('error' in chain) throw new Error(`${path.name}: ${chain.error}`);
+      let pen = draw([chain.start.x, chain.start.y]);
+      for (const s of chain.steps) {
+        if (s.kind === 'line') pen = pen.lineTo([s.to.x, s.to.y]);
+        else if (s.kind === 'arc') pen = pen.threePointsArcTo([s.to.x, s.to.y], [s.mid.x, s.mid.y]);
+        else for (const sp of s.spans) pen = pen.cubicBezierCurveTo([sp.p3.x, sp.p3.y], [sp.c1.x, sp.c1.y], [sp.c2.x, sp.c2.y]);
+      }
+      const spine = (chain.closed ? pen.close() : pen.done()).sketchOnPlane(planeFor(doc, path)) as unknown as { wire: Parameters<typeof genericSweep>[1] };
+      const profile = loopDrawing(loops[0]).sketchOnPlane(planeFor(doc, prof)) as unknown as { wire: Parameters<typeof genericSweep>[0] };
+      try {
+        return { solid: genericSweep(profile.wire, spine.wire, { frenet: true }) as Shape3D, cut: false };
+      } catch {
+        throw new Error('The sweep could not be built. Put the profile at the start of the path, square to it.');
+      }
+    }
     default:
       throw new Error('This feature cannot be repeated.');
   }
@@ -195,7 +272,9 @@ function apply(doc: PartDocument, body: Shape3D | null, f: FeatureDraft): Shape3
     case 'cutExtrude':
     case 'revolve':
     case 'cutRevolve':
-    case 'hole': {
+    case 'hole':
+    case 'loft':
+    case 'sweep': {
       const t = toolOf(doc, f);
       return combine(body, t.solid, t.cut);
     }
@@ -206,6 +285,10 @@ function apply(doc: PartDocument, body: Shape3D | null, f: FeatureDraft): Shape3
       if (!(size > 0)) throw new Error(`${f.type === 'fillet' ? 'Radius' : 'Distance'} must be more than zero.`);
       const filter = findEdges(doc, body, f.edges);
       try {
+        if (f.type === 'fillet' && f.size2) {
+          if (!(f.size2.value > 0)) throw new Error('The end radius must be more than zero.');
+          return body.fillet({ filter, radius: [size, f.size2.value] });
+        }
         return f.type === 'fillet' ? body.fillet({ filter, radius: size }) : body.chamfer({ filter, radius: size });
       } catch {
         throw new Error(`The ${f.type} could not be built. The size is probably too large for these edges.`);
@@ -325,7 +408,7 @@ function replay(doc: PartDocument, extra?: FeatureDraft) {
   let body: Shape3D | null = null;
   let key = 0x811c9dc5;
   for (const f of doc.features.slice(0, doc.rollbackIndex)) {
-    key = fnv(JSON.stringify(f), key);
+    key = fnv(JSON.stringify({ ...f, color: undefined }), key);
     const k = key.toString(36);
     const hit = cache.get(k);
     if (hit) {
@@ -375,11 +458,12 @@ function meshOf(body: Shape3D | null): MeshData | null {
     triangles: new Uint32Array(m.triangles),
     edges: new Float32Array(e.lines),
     edgeGroups: new Uint32Array(e.edgeGroups.flatMap((g) => [g.start, g.count])),
+    faceGroups: new Uint32Array(m.faceGroups.flatMap((g) => [g.start, g.count])),
   };
 }
 
 const transferables = (m: MeshData | null) =>
-  m ? [m.vertices.buffer, m.normals.buffer, m.triangles.buffer, m.edges.buffer, m.edgeGroups.buffer] : [];
+  m ? [m.vertices.buffer, m.normals.buffer, m.triangles.buffer, m.edges.buffer, m.edgeGroups.buffer, m.faceGroups.buffer] : [];
 
 function messageOf(e: unknown): string {
   if (e instanceof Error) return e.message;
