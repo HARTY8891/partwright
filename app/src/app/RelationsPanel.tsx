@@ -28,7 +28,7 @@ export function entityLabel(sk: Sketch, id: Id): string {
   const same = sk.entities.filter((x) => x.kind === e.kind);
   const n = same.indexOf(e) + (e.kind === 'point' ? 0 : 1); // point 0 is the origin
   if (e.kind === 'point') return n === 0 ? 'Origin' : `Point ${n}`;
-  const word = e.kind === 'line' ? (e.construction ? 'Centerline' : 'Line') : e.kind === 'circle' ? 'Circle' : 'Arc';
+  const word = e.kind === 'line' ? (e.construction ? 'Centerline' : 'Line') : e.kind === 'circle' ? 'Circle' : e.kind === 'text' ? 'Text' : e.kind === 'spline' ? 'Spline' : 'Arc';
   return `${word} ${n}`;
 }
 
@@ -107,6 +107,8 @@ export function RelationsPanel() {
         )}
       </PanelSection>
 
+      {ids.length === 1 && sk.entities.find((e) => e.id === ids[0])?.kind === 'text' && <TextSection id={ids[0]} sk={sk} />}
+
       <ModifySection ids={ids} sk={sk} />
 
       <PanelSection title="Existing relations">
@@ -128,6 +130,38 @@ export function RelationsPanel() {
         )}
       </PanelSection>
     </section>
+  );
+}
+
+/** Edit a text entity: the words, the letter height and the angle. */
+function TextSection({ id, sk }: { id: Id; sk: Sketch }) {
+  const units = useDoc((s) => s.doc.units);
+  const e = sk.entities.find((x) => x.id === id);
+  const [draft, setDraft] = useState<string | null>(null);
+  if (e?.kind !== 'text') return null;
+  const s = useDoc.getState();
+  const k = units === 'in' ? 25.4 : 1;
+  const commit = () => {
+    if (draft !== null && draft !== e.text) s.updateText(id, { text: draft });
+    setDraft(null);
+  };
+  return (
+    <PanelSection title="Text">
+      <label className="flex flex-col gap-1 text-xs">
+        Words
+        <input
+          aria-label="Text to write"
+          className="h-14 px-3 rounded-sm border border-border-input bg-surface text-sm"
+          value={draft ?? e.text}
+          onChange={(ev) => setDraft(ev.target.value)}
+          onBlur={commit}
+          onKeyDown={(ev) => ev.key === 'Enter' && commit()}
+        />
+      </label>
+      <NumberField key={`h${units}${e.height}`} label="Letter height" lengthUnits={units} min={0.001} value={String(+(e.height / k).toFixed(4))} onCommit={(_, v) => s.updateText(id, { height: v })} />
+      <NumberField key={`a${e.angle}`} label="Text angle" unit="°" value={String(e.angle)} onCommit={(_, v) => s.updateText(id, { angle: v })} />
+      <p className="text-2xs text-text-muted">The baseline starts at the text's point: drag it, dimension it or fix it like any point. Letters inside an outline are cut out of it.</p>
+    </PanelSection>
   );
 }
 

@@ -4,7 +4,7 @@ import {
   Axis3D, Box, Circle, CircleDot, Eye, EyeOff, Hexagon, Layers, Maximize, Minus, MousePointer2, PenLine,
   RectangleHorizontal, Redo2, Rotate3D, Ruler, Scale3D, Scissors, Square, Trash2, Undo2, Pencil, Loader2,
   Spline, SquareDashed, Cylinder, MoveDiagonal, CircleDashed, PackageOpen, Columns3, RotateCw, FlipHorizontal2,
-  Layers2, Slash, TriangleRight, Cable, Dot, Grid3x3, SquareDashedBottom, Pentagon, RectangleEllipsis, Variable as VariableIcon, SquareSplitHorizontal, Waves, ScissorsLineDashed, ArrowRightToLine, FileInput, Blend, Route,
+  Layers2, Slash, TriangleRight, Cable, Dot, Type, Sunrise, ScrollText, SplitSquareHorizontal, Grid3x3, SquareDashedBottom, Pentagon, RectangleEllipsis, Variable as VariableIcon, SquareSplitHorizontal, Waves, ScissorsLineDashed, ArrowRightToLine, FileInput, Blend, Route,
 } from 'lucide-react';
 import { useDoc, consumedSketches, getSketch, type Tool } from '../store/docStore';
 import { exportFile, startKernelSync, useKernel } from '../store/rebuild';
@@ -282,6 +282,9 @@ function CommandRibbon() {
           {feat('sweep', <Route size={24} />, 'Sweep')}
           {feat('rib', <TriangleRight size={24} />, 'Rib')}
           {feat('helix', <Cable size={24} />, 'Helix')}
+          {feat('dome', <Sunrise size={24} />, 'Dome')}
+          {feat('wrap', <ScrollText size={24} />, 'Wrap')}
+          {feat('splitLine', <SplitSquareHorizontal size={24} />, 'Split line')}
           <RibbonDivider />
           {feat('cutExtrude', <Scissors size={24} />, 'Cut', 'X')}
           {feat('cutRevolve', <Cylinder size={24} />, 'Cut revolve')}
@@ -318,6 +321,7 @@ function CommandRibbon() {
           {toolBtn('polygon', <Pentagon size={24} />, 'Polygon', 'P')}
           {toolBtn('slot', <RectangleEllipsis size={24} />, 'Slot', 'T')}
           {toolBtn('spline', <Waves size={24} />, 'Spline', 'N')}
+          {toolBtn('text', <Type size={24} />, 'Text', 'X')}
           <RibbonDivider />
           {toolBtn('trim', <ScissorsLineDashed size={24} />, 'Trim', 'Y')}
           {toolBtn('extend', <ArrowRightToLine size={24} />, 'Extend', 'W')}
@@ -351,7 +355,7 @@ function CommandRibbon() {
 /* ---------- feature tree ---------- */
 
 const ICONS: Record<Feature['type'], ReactNode> = {
-  plane: <Square size={16} />, axis: <Slash size={16} />, rib: <TriangleRight size={16} />, helix: <Cable size={16} />, sketch: <PenLine size={16} />, extrude: <Box size={16} />, cutExtrude: <Scissors size={16} />,
+  plane: <Square size={16} />, axis: <Slash size={16} />, rib: <TriangleRight size={16} />, helix: <Cable size={16} />, dome: <Sunrise size={16} />, wrap: <ScrollText size={16} />, splitLine: <SplitSquareHorizontal size={16} />, sketch: <PenLine size={16} />, extrude: <Box size={16} />, cutExtrude: <Scissors size={16} />,
   revolve: <Rotate3D size={16} />, cutRevolve: <Cylinder size={16} />, fillet: <CircleDot size={16} />, chamfer: <Hexagon size={16} />,
   hole: <CircleDashed size={16} />, shell: <PackageOpen size={16} />, linearPattern: <Columns3 size={16} />,
   circularPattern: <RotateCw size={16} />, mirror: <FlipHorizontal2 size={16} />, sketchPattern: <Grid3x3 size={16} />, import: <FileInput size={16} />,
@@ -498,7 +502,7 @@ function RollbackBarRow({ index, max }: { index: number; max: number }) {
 const TITLES: Record<FeatureDraft['type'], string> = {
   extrude: 'Extrude', cutExtrude: 'Cut', revolve: 'Revolve', cutRevolve: 'Cut revolve', fillet: 'Fillet', chamfer: 'Chamfer',
   hole: 'Hole', shell: 'Shell', linearPattern: 'Linear pattern', circularPattern: 'Circular pattern', sketchPattern: 'Sketch-driven pattern', mirror: 'Mirror', plane: 'Plane', import: 'Imported solid',
-  loft: 'Loft', sweep: 'Sweep', axis: 'Reference axis', rib: 'Rib', helix: 'Helix',
+  loft: 'Loft', sweep: 'Sweep', axis: 'Reference axis', rib: 'Rib', helix: 'Helix', dome: 'Dome', wrap: 'Wrap', splitLine: 'Split line',
 };
 
 function FeatureOptions() {
@@ -790,6 +794,7 @@ function useShortcuts() {
         if (k === 'y') s.setTool('trim');
         if (k === 'w') s.setTool('extend');
         if (k === 'o') s.setTool('point');
+        if (k === 'x') s.setTool('text');
         if (k === 'd') s.setTool('dimension');
         if (k === 'g') useView.getState().sketchSel.forEach((id) => s.toggleConstruction(id));
         if (k === 'escape' && !s.editingDimId) s.setTool('select');

@@ -22,7 +22,9 @@ export type SketchEntity =
   /** arc from start to end around center; ccw = counter-clockwise in sketch coordinates */
   | { id: Id; kind: 'arc'; center: Id; start: Id; end: Id; ccw: boolean; construction: boolean }
   /** smooth curve through its points, in order (first and last are its ends) */
-  | { id: Id; kind: 'spline'; points: Id[]; construction: boolean };
+  | { id: Id; kind: 'spline'; points: Id[]; construction: boolean }
+  /** letters with their baseline starting at point `at`; height is a capital letter's height */
+  | { id: Id; kind: 'text'; at: Id; text: string; height: number; angle: number; construction: boolean };
 
 export type LineEntity = Extract<SketchEntity, { kind: 'line' }>;
 export type CircleEntity = Extract<SketchEntity, { kind: 'circle' }>;
@@ -254,6 +256,34 @@ export interface PatternFeature extends FeatureBase {
   reverse: boolean;
 }
 
+/** A rounded bump (or dent) on a flat face, as high as `height` at the middle. */
+export interface DomeFeature extends FeatureBase {
+  type: 'dome';
+  at: FacePoint | null;
+  height: Param;
+  /** a dent into the part instead of a bump */
+  reverse: boolean;
+}
+
+/** A sketch wrapped round a round face of the part, raised (emboss) or sunk (deboss). */
+export interface WrapFeature extends FeatureBase {
+  type: 'wrap';
+  /** on a plane parallel to the round face's axis */
+  sketchId: Id;
+  /** the circle or arc of the extrude or cut that made the round face */
+  cylinder: { featureId: Id; entityId: Id };
+  depth: Param;
+  mode: 'emboss' | 'deboss';
+  /** wrap on the far side of the round face */
+  flip: boolean;
+}
+
+/** Divides the face a sketch is drawn on along the sketch's outline (to colour part of it). */
+export interface SplitLineFeature extends FeatureBase {
+  type: 'splitLine';
+  sketchId: Id;
+}
+
 /** Copies of features placed on the points of a sketch (sketch-driven pattern). */
 export interface SketchPatternFeature extends FeatureBase {
   type: 'sketchPattern';
@@ -284,10 +314,10 @@ export interface MirrorFeature extends FeatureBase {
 export type Feature =
   | PlaneFeature | SketchFeature | ExtrudeFeature | RevolveFeature | EdgeFeature
   | HoleFeature | ShellFeature | PatternFeature | MirrorFeature | ImportFeature | LoftFeature | SweepFeature | AxisFeature
-  | RibFeature | HelixFeature | SketchPatternFeature;
+  | RibFeature | HelixFeature | SketchPatternFeature | DomeFeature | WrapFeature | SplitLineFeature;
 export type SolidFeature =
   | ExtrudeFeature | RevolveFeature | EdgeFeature | HoleFeature | ShellFeature | PatternFeature | MirrorFeature | ImportFeature
-  | LoftFeature | SweepFeature | RibFeature | SketchPatternFeature;
+  | LoftFeature | SweepFeature | RibFeature | SketchPatternFeature | DomeFeature | WrapFeature | SplitLineFeature;
 export type SolidType = SolidFeature['type'];
 
 export interface PartDocument {
@@ -349,7 +379,7 @@ export const sketchesOf = (f: Feature): Id[] =>
       ? f.sketchIds
       : f.type === 'sweep'
         ? [f.profileId, f.pathId]
-        : f.type === 'rib' || f.type === 'helix' || f.type === 'sketchPattern'
+        : f.type === 'rib' || f.type === 'helix' || f.type === 'sketchPattern' || f.type === 'wrap' || f.type === 'splitLine'
           ? [f.sketchId]
           : [];
 

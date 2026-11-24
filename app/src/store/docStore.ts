@@ -19,7 +19,7 @@ import { useView } from '../viewport/viewStore';
 import { useSettings } from './settings';
 import { exprFor, type Units } from '../model/units';
 
-export type Tool = 'select' | 'point' | 'line' | 'centerline' | 'rect' | 'circle' | 'arc' | 'polygon' | 'slot' | 'spline' | 'trim' | 'extend' | 'dimension';
+export type Tool = 'select' | 'point' | 'text' | 'line' | 'centerline' | 'rect' | 'circle' | 'arc' | 'polygon' | 'slot' | 'spline' | 'trim' | 'extend' | 'dimension';
 
 export type Mode =
   | { kind: 'model' }
@@ -77,6 +77,9 @@ interface State {
   /** copy the edges of the part's faces in the sketch plane into the sketch, fixed */
   convertEdges(): Promise<boolean>;
   addPoint(at: PointPick): void;
+  /** text with its baseline starting at the pick; returns the text's id */
+  addText(at: PointPick): Id | null;
+  updateText(id: Id, patch: { text?: string; height?: number; angle?: number }): void;
   filletSelection(ids: Id[], radius: number): boolean;
   offsetSelection(ids: Id[], distance: number): boolean;
   removeConstraint(id: Id): void;
@@ -136,7 +139,7 @@ export function makeDoc(units: Units = 'mm'): PartDocument {
 const BASE_NAMES: Record<FeatureDraft['type'], string> = {
   extrude: 'Extrude', cutExtrude: 'Cut', revolve: 'Revolve', cutRevolve: 'CutRevolve', fillet: 'Fillet', chamfer: 'Chamfer',
   hole: 'Hole', shell: 'Shell', linearPattern: 'LPattern', circularPattern: 'CPattern', sketchPattern: 'SketchPattern', mirror: 'Mirror', plane: 'Plane', import: 'Import',
-  loft: 'Loft', sweep: 'Sweep', axis: 'Axis', rib: 'Rib', helix: 'Helix',
+  loft: 'Loft', sweep: 'Sweep', axis: 'Axis', rib: 'Rib', helix: 'Helix', dome: 'Dome', wrap: 'Wrap', splitLine: 'SplitLine',
 };
 
 /** Insert a new feature at the rollback bar and move the bar past it. */
@@ -155,6 +158,19 @@ function nextName(doc: PartDocument, base: string) {
 export const getSketch = (doc: PartDocument, id: Id) =>
   doc.features.find((f): f is SketchFeature => f.id === id && f.type === 'sketch');
 
+/** Round faces made by an extrude or cut of a circle or arc, for Wrap to wrap onto. */
+export function roundFaces(doc: PartDocument): { label: string; value: { featureId: Id; entityId: Id } }[] {
+  const out: { label: string; value: { featureId: Id; entityId: Id } }[] = [];
+  for (const f of doc.features.slice(0, doc.rollbackIndex)) {
+    if ((f.type !== 'extrude' && f.type !== 'cutExtrude') || f.suppressed) continue;
+    const sk = getSketch(doc, f.sketchId);
+    sk?.sketch.entities.forEach((e) => {
+      if ((e.kind === 'circle' || e.kind === 'arc') && !e.construction) out.push({ label: `${f.name}: ${e.kind === 'circle' ? 'circle' : 'arc'} ${out.filter((o) => o.value.featureId === f.id).length + 1}`, value: { featureId: f.id, entityId: e.id } });
+    });
+  }
+  return out;
+}
+
 /** Sketches already used by a feature (shown nested under it in the tree). */
 export function consumedSketches(doc: PartDocument): Set<Id> {
   return new Set(doc.features.flatMap((f) => sketchesOf(f)));
@@ -169,6 +185,8 @@ export function directDependents(doc: PartDocument, id: Id): Feature[] {
     if (x.type === 'linearPattern' || x.type === 'circularPattern') return x.seeds.includes(id) || x.axisId === id;
     if (x.type === 'mirror') return x.seeds.includes(id) || x.planeId === id;
     if (x.type === 'sketchPattern') return x.seeds.includes(id);
+    if (x.type === 'wrap') return x.cylinder.featureId === id;
+    if (x.type === 'dome') return x.at?.face.featureId === id;
     if (x.type === 'hole') return x.at?.face.featureId === id;
     if (x.type === 'shell') return x.faces.some((fp) => fp.face.featureId === id);
     if (x.type === 'axis') return axisInputs(x.def).includes(id);
@@ -522,6 +540,9 @@ export const useDoc = create<State>((set, get) => {
       } else if (ent.kind === 'spline') {
         get().notify('info', 'Splines are shaped by their points: dimension the points instead.');
         return;
+      } else if (ent.kind === 'text') {
+        get().notify('info', "Set the letter height in the Text panel; dimension the text's point to place it.");
+        return;
       } else {
         const c = pointOf(sk, ent.center);
         const a = pointOf(sk, ent.start);
@@ -622,6 +643,22 @@ export const useDoc = create<State>((set, get) => {
       else if (res) get().notify('success', `Converted ${edges.length} edge${edges.length === 1 ? '' : 's'} into the sketch. They are fixed in place.`);
       return !err && !!res;
     },
+    addText: (at) => {
+      const id = uid();
+      const h = get().doc.units === 'in' ? 0.25 * 25.4 : 5;
+      const res = sketchChange((s) => {
+        const p = resolvePick(s, at);
+        s.entities.push({ id, kind: 'text', at: p, text: 'Text', height: h, angle: 0, construction: false });
+      });
+      return res ? id : null;
+    },
+    updateText: (id, patch) => {
+      if (patch.height !== undefined && !(patch.height > 0)) return get().notify('error', 'The text height must be more than zero.');
+      sketchChange((s) => {
+        const e = s.entities.find((x) => x.id === id);
+        if (e?.kind === 'text') Object.assign(e, patch);
+      });
+    },
     addPoint: (at) => {
       if ('id' in at) return;
       sketchChange((s) => void s.entities.push({ id: uid(), kind: 'point', p: { ...at.at }, construction: false }));
@@ -677,12 +714,17 @@ export const useDoc = create<State>((set, get) => {
     deleteSketchEntity: (id) => {
       sketchChange((s) => {
         const e = s.entities.find((x) => x.id === id);
-        if (!e || e.kind === 'point') return;
+        if (!e) return;
         const removeIds = new Set([id]);
-        const pts = e.kind === 'line' ? [e.p1, e.p2] : e.kind === 'arc' ? [e.start, e.end, e.center] : e.kind === 'spline' ? [...e.points] : [e.center];
+        const pts = e.kind === 'point' ? [] : e.kind === 'line' ? [e.p1, e.p2] : e.kind === 'arc' ? [e.start, e.end, e.center] : e.kind === 'spline' ? [...e.points] : e.kind === 'text' ? [e.at] : [e.center];
+        if (e.kind === 'point') {
+          // only a loose point (not the origin, not an end or centre of anything)
+          const usedBy = s.entities.some((x) => x.kind !== 'point' && JSON.stringify(x).includes(`"${id}"`));
+          if (usedBy || s.constraints.some((c) => c.kind === 'fix' && c.entityIds[0] === id && e.construction)) return;
+        }
         for (const p of pts) {
           const used = s.entities.some(
-            (x) => x.id !== id && ((x.kind === 'line' && (x.p1 === p || x.p2 === p)) || (x.kind === 'arc' && (x.start === p || x.end === p || x.center === p)) || (x.kind === 'circle' && x.center === p) || (x.kind === 'spline' && x.points.includes(p))),
+            (x) => x.id !== id && ((x.kind === 'line' && (x.p1 === p || x.p2 === p)) || (x.kind === 'arc' && (x.start === p || x.end === p || x.center === p)) || (x.kind === 'circle' && x.center === p) || (x.kind === 'spline' && x.points.includes(p)) || (x.kind === 'text' && x.at === p)),
           );
           const isOrigin = s.constraints.some((c) => c.kind === 'fix' && c.entityIds[0] === p);
           if (!used && !isOrigin) removeIds.add(p);
@@ -784,6 +826,14 @@ export const useDoc = create<State>((set, get) => {
         set({ mode: { kind: 'feature', draft } });
         return;
       }
+      if (type === 'dome') {
+        if (!hasSolid) {
+          get().notify('info', 'Make a solid first.');
+          return;
+        }
+        set({ mode: { kind: 'feature', draft: { type, at: null, height: defaultLen(5, 0.2), reverse: false } } });
+        return;
+      }
       if (type === 'import') {
         get().notify('info', 'Use File ▸ Import to bring in a solid from a STEP, STL, OBJ, 3MF or BREP file.');
         return;
@@ -814,6 +864,23 @@ export const useDoc = create<State>((set, get) => {
       } else {
         const id = pickSketch(sid);
         if (!id) return;
+        if (type === 'splitLine') {
+          if (!hasSolid) {
+            get().notify('info', 'Make a solid first, then draw the outline on one of its faces.');
+            return;
+          }
+          set({ mode: { kind: 'feature', draft: { type, sketchId: id } } });
+          return;
+        }
+        if (type === 'wrap') {
+          const rounds = roundFaces(get().doc);
+          if (!hasSolid || !rounds.length) {
+            get().notify('info', 'Wrap needs a round face: extrude a circle first.');
+            return;
+          }
+          set({ mode: { kind: 'feature', draft: { type, sketchId: id, cylinder: rounds[0].value, depth: defaultLen(1, 0.04), mode: 'emboss', flip: false } } });
+          return;
+        }
         if (type === 'rib') {
           if (!hasSolid) {
             get().notify('info', 'A rib grows into a solid. Make a solid first.');

@@ -4,7 +4,7 @@
 import { expose, transfer } from 'comlink';
 import opencascade from 'replicad-opencascadejs';
 import wasmUrl from 'replicad-opencascadejs/wasm?url';
-import { DistanceQuery, makeBox, makeHelix, makeVertex, draw, drawCircle, drawRectangle, EdgeFinder, genericSweep, importSTEP, deserializeShape, makePolygon, makeSolid, getOC, cast, FaceFinder, measureArea, measureShapeVolumeProperties, measureVolume, Plane, setOC, type Drawing, type Shape3D } from 'replicad';
+import { basicFaceExtrusion, makeSphere, Vector, type Face, DistanceQuery, makeBox, makeHelix, makeVertex, draw, drawCircle, drawRectangle, EdgeFinder, genericSweep, importSTEP, deserializeShape, makePolygon, makeSolid, getOC, cast, FaceFinder, measureArea, measureShapeVolumeProperties, measureVolume, Plane, setOC, type Drawing, type Shape3D } from 'replicad';
 import type { EdgeRef, FeatureDraft, HelixFeature, PartDocument, PatternAxis, RibFeature, SketchFeature } from '../model/types';
 import { isSeedType } from '../model/types';
 import { frameForSketch, planeById, planeFrame, add, cross, dot, neg, scale, toWorld, sub, type Vec3 } from '../model/planes';
@@ -16,6 +16,7 @@ import { helixGeom } from '../model/helix';
 import { fromBase64, parseSTL, stlPart } from '../model/importFormats';
 import type { FlatEdge } from '../solver/modify';
 import { patternPoints } from '../model/refs';
+import { loadSketchFont } from '../model/text';
 
 export interface FeatureStatus {
   id: string;
@@ -48,7 +49,7 @@ export interface RebuildResult {
 
 let ready: Promise<void> | null = null;
 function init() {
-  ready ??= opencascade({ locateFile: () => wasmUrl }).then((oc) => setOC(oc));
+  ready ??= Promise.all([opencascade({ locateFile: () => wasmUrl }).then((oc) => setOC(oc)), loadSketchFont()]).then(() => undefined);
   return ready;
 }
 
@@ -386,6 +387,57 @@ function apply(doc: PartDocument, body: Shape3D | null, f: FeatureDraft): Shape3
       }
       return out;
     }
+    case 'dome': {
+      if (!body) throw new Error('There is no solid yet.');
+      if (!f.at) throw new Error('Click the flat face to put the dome on.');
+      const h = f.height.value;
+      if (!(h > 0)) throw new Error('The dome height must be more than zero.');
+      const p = facePointWorld(doc, f.at);
+      const face = p && new FaceFinder().near(p, 1e-3).find(body).find((x) => x.geomType === 'PLANE');
+      if (!face) throw new Error(`The face (${faceLabel(doc, f.at.face)}) no longer exists. Pick it again.`);
+      const n = face.normalAt(p) as unknown as { x: number; y: number; z: number };
+      const out: Vec3 = [n.x, n.y, n.z];
+      const cv = face.center;
+      const C: Vec3 = [cv.x, cv.y, cv.z];
+      // the sphere reaches the face's farthest edge point, and `h` above its centre
+      let R = 0;
+      for (const e of face.edges)
+        for (let i = 0; i <= 16; i++) {
+          const q = e.pointAt(i / 16);
+          const d = sub([q.x, q.y, q.z], C);
+          R = Math.max(R, Math.hypot(...sub(d, scale(out, dot(d, out)))));
+        }
+      const rho = (R * R + h * h) / (2 * h);
+      const d = f.reverse ? neg(out) : out;
+      const prism = basicFaceExtrusion(face, new Vector(scale(d, h))) as Shape3D;
+      const sphere = makeSphere(rho).translate(add(C, scale(d, h - rho))) as Shape3D;
+      const dome = prism.intersect(sphere) as Shape3D;
+      if (!(measureVolume(dome) > 1e-9)) throw new Error('The dome could not be built on this face.');
+      return combine(body, dome, f.reverse);
+    }
+    case 'wrap':
+      return wrapSolid(doc, body, f);
+    case 'splitLine': {
+      if (!body) throw new Error('There is no solid yet.');
+      const sk = sketchOf(doc, f.sketchId);
+      const before = body.faces.length;
+      const oc = getOC();
+      const tools = sketchFaces(profileDrawing(sk), planeFor(doc, sk));
+      const splitter = new oc.BRepAlgoAPI_Splitter();
+      const args = new oc.NCollection_List_TopoDS_Shape([body.wrapped]);
+      const tl = new oc.NCollection_List_TopoDS_Shape(tools.map((t) => t.wrapped));
+      splitter.SetArguments(args);
+      splitter.SetTools(tl);
+      splitter.Build();
+      const res = cast(splitter.Shape()) as Shape3D;
+      splitter.delete();
+      args.delete();
+      tl.delete();
+      const solid = (iterSolids(res)[0] ?? res) as Shape3D;
+      if (solid.faces.length <= before) throw new Error(`${sk.name}'s outline does not lie on a face of the part. Draw it on the face to split.`);
+      if (Math.abs(measureVolume(solid) - measureVolume(body)) > 1e-6 * Math.max(1, measureVolume(body))) throw new Error('The split line changed the solid. Draw it on a face of the part.');
+      return solid;
+    }
     case 'sketchPattern': {
       if (!body) throw new Error('There is no solid yet.');
       const sk = sketchOf(doc, f.sketchId);
@@ -563,7 +615,7 @@ function replay(doc: PartDocument, extra?: FeatureDraft) {
 function faceOwners(doc: PartDocument, mesh: MeshData): string[] | undefined {
   const coloured = doc.features
     .slice(0, doc.rollbackIndex)
-    .filter((f) => f.color && !f.suppressed && isSeedType(f.type))
+    .filter((f) => f.color && !f.suppressed && (isSeedType(f.type) || f.type === 'splitLine'))
     .reverse();
   if (!coloured.length) return undefined;
   const v = mesh.vertices, t = mesh.triangles;
@@ -584,7 +636,11 @@ function faceOwners(doc: PartDocument, mesh: MeshData): string[] | undefined {
   for (const f of coloured) {
     let tool: Shape3D;
     try {
-      tool = toolOf(doc, f as FeatureDraft).solid;
+      if (f.type === 'splitLine') {
+        // a thin slab on the outline: faces lying on it take the colour
+        const sk = sketchOf(doc, f.sketchId);
+        tool = profileDrawing(sk).sketchOnPlane(planeFor(doc, sk, -0.01)).extrude(0.02) as Shape3D;
+      } else tool = toolOf(doc, f as FeatureDraft).solid;
     } catch {
       continue;
     }
@@ -673,6 +729,106 @@ function messageOf(e: unknown): string {
   if (e instanceof Error) return e.message;
   if (typeof e === 'number') return 'The geometry kernel could not build this feature.';
   return String(e);
+}
+
+/* ---------- wrap ---------- */
+
+/** The solids inside a shape (a solid, or a compound holding solids). */
+function iterSolids(s: Shape3D): Shape3D[] {
+  const oc = getOC();
+  const out: Shape3D[] = [];
+  const ex = new oc.TopExp_Explorer(s.wrapped, oc.TopAbs_ShapeEnum.TopAbs_SOLID, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+  for (; ex.More(); ex.Next()) out.push(cast(ex.Current()) as Shape3D);
+  ex.delete();
+  return out;
+}
+
+/** The faces of a drawing placed on a plane or a curved face. */
+function sketchFaces(d: Drawing, where: Plane | Face): Face[] {
+  const s = (where instanceof Plane ? d.sketchOnPlane(where) : d.sketchOnFace(where, 'original')) as unknown as { face?: () => Face; sketches?: { face: () => Face }[] };
+  if (s.sketches) return s.sketches.map((x) => x.face());
+  return [s.face!()];
+}
+
+/** A face thickened into a solid, `t` along its normal (negative: the other way). */
+function thicken(face: Face, t: number): Shape3D {
+  const oc = getOC();
+  const mk = new oc.BRepOffsetAPI_MakeThickSolid();
+  mk.MakeThickSolidBySimple(face.wrapped, t);
+  mk.Build();
+  let s = cast(mk.Shape()) as Shape3D;
+  mk.delete();
+  // thickening against the face's normal gives an inside-out solid: turn it right way out
+  if (measureVolume(s) < 0) s = cast(s.wrapped.Reversed()) as Shape3D;
+  return s;
+}
+
+/**
+ * Wrap: the sketch is laid round the cylinder without stretching. A point
+ * at distance s across the sketch (square to the axis) lands s/R radians round
+ * from the line of the cylinder facing the sketch; along the axis it keeps its place.
+ */
+function wrapSolid(doc: PartDocument, body: Shape3D | null, f: Extract<FeatureDraft, { type: 'wrap' }>): Shape3D {
+  if (!body) throw new Error('There is no solid to wrap onto yet.');
+  const t = f.depth.value;
+  if (!(t > 0)) throw new Error('The wrap depth must be more than zero.');
+  const sk = sketchOf(doc, f.sketchId);
+  const frame = frameForSketch(doc, sk.id)!;
+  const ax = resolveAxis(doc, { type: 'cylinder', ...f.cylinder });
+  if ('error' in ax) throw new Error(ax.error);
+  const ex = getSketchFeature(doc, (doc.features.find((x) => x.id === f.cylinder.featureId) as { sketchId: string }).sketchId)!;
+  const ent = ex.sketch.entities.find((e) => e.id === f.cylinder.entityId)!;
+  const R = ent.kind === 'circle' ? ent.radius : ent.kind === 'arc' ? Math.hypot(pointOf(ex.sketch, ent.start).x - pointOf(ex.sketch, ent.center).x, pointOf(ex.sketch, ent.start).y - pointOf(ex.sketch, ent.center).y) : 0;
+  const a = scale(ax.dir, 1 / Math.hypot(...ax.dir));
+  if (Math.abs(dot(frame.normal, a)) > 1e-6) throw new Error(`${sk.name} must be on a plane parallel to the round face's axis.`);
+  const n = f.flip ? neg(frame.normal) : frame.normal;
+  const w = cross(a, n);
+  const A = ax.origin;
+  const cyl = body.faces.filter((x) => x.geomType === 'CYLINDRE').find((x) => {
+    const q = x.pointOnSurface(0.5, 0.5);
+    const r = sub([q.x, q.y, q.z], A);
+    return Math.abs(Math.hypot(...sub(r, scale(a, dot(r, a)))) - R) < 1e-3;
+  });
+  if (!cyl) throw new Error('That round face is no longer on the part.');
+  const Q = (phi: number, v: number): Vec3 => add(add(A, scale(a, v)), add(scale(n, R * Math.cos(phi)), scale(w, R * Math.sin(phi))));
+  const [u0, v0] = cyl.uvCoordinates(Q(0, 0));
+  const [u1] = cyl.uvCoordinates(Q(0.1, 0));
+  const [, v1] = cyl.uvCoordinates(Q(0, 1));
+  let du = Math.atan2(Math.sin(u1 - u0), Math.cos(u1 - u0)) / 0.1; // radians of u per radian round: ±1
+  const dv = v1 - v0; // ±1 per mm
+  let uStart = u0;
+  {
+    // replicad lays sketches on a left-handed cylinder with u reversed (u -> 2π - u)
+    const oc = getOC();
+    const ad = new oc.BRepAdaptor_Surface(cyl.wrapped, true);
+    const c = ad.Cylinder();
+    if (!c.Direct()) (uStart = 2 * Math.PI - u0), (du = -du);
+    c.delete();
+    ad.delete();
+  }
+  // sketch (x, y) -> (s, v) is a turn (perhaps a flip) and a shift
+  const rel = sub(frame.origin, A);
+  const [m11, m12, m21, m22] = [dot(frame.xDir, w), dot(frame.yDir, w), dot(frame.xDir, a), dot(frame.yDir, a)];
+  let d = profileDrawing(sk);
+  let [r11, r21] = [m11, m21];
+  if (m11 * m22 - m12 * m21 < 0) {
+    d = d.stretch(-1, [0, 1], [0, 0]);
+  }
+  d = d.rotate((Math.atan2(r21, r11) * 180) / Math.PI, [0, 0]).translate(dot(rel, w), dot(rel, a));
+  // (s, v) -> the face's (u, v), with u in mm round the face: replicad's
+  // 'original' mode divides it by the radius itself
+  if (du < 0) d = d.stretch(-1, [1, 0], [0, 0]);
+  if (dv < 0) d = d.stretch(-1, [0, 1], [0, 0]);
+  if (Math.abs(Math.abs(dv) - 1) > 1e-6) d = d.stretch(Math.abs(dv), [0, 1], [0, 0]);
+  d = d.translate(uStart * R, v0);
+  let out = body;
+  for (const fc of sketchFaces(d, cyl)) {
+    const up = thicken(fc, t), down = thicken(fc, -t);
+    const overlap = (s: Shape3D) => measureVolume(body.intersect(s) as Shape3D);
+    const [inside, outside] = overlap(up) > overlap(down) ? [up, down] : [down, up];
+    out = combine(out, f.mode === 'deboss' ? inside : outside, f.mode === 'deboss', false);
+  }
+  return out;
 }
 
 /* ---------- convert entities ---------- */

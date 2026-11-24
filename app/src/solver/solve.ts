@@ -340,6 +340,7 @@ export function solveSketch(input: Sketch): SolveResult {
     if (e.kind === 'circle' && ptDefined(e.center) && determined[ix.rad.get(e.id)!]) defined.add(e.id);
     if (e.kind === 'arc' && ptDefined(e.center) && ptDefined(e.start) && ptDefined(e.end)) defined.add(e.id);
     if (e.kind === 'spline' && e.points.every(ptDefined)) defined.add(e.id);
+    if (e.kind === 'text' && ptDefined(e.at)) defined.add(e.id);
   }
 
   const solved: Sketch = {

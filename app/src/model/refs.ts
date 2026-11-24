@@ -24,6 +24,7 @@ export function patternPoints(sk: Sketch): Pt[] {
     else if (e.kind === 'circle') used.add(e.center);
     else if (e.kind === 'arc') used.add(e.center).add(e.start).add(e.end);
     else if (e.kind === 'spline') e.points.forEach((p) => used.add(p));
+    else if (e.kind === 'text') used.add(e.at);
   }
   const out: Pt[] = [];
   for (const e of sk.entities) {

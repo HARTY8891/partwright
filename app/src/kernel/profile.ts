@@ -2,6 +2,7 @@
 import type { Id, Pt, Sketch } from '../model/types';
 import { arcAt, arcMid, pointOf } from '../model/refs';
 import { bezierAt, reverseSpans, splineSpans, type Span } from '../model/spline';
+import { textContours } from '../model/text';
 
 /** One step of an outline: a straight line or an arc through `mid`, ending at `to`. */
 export type Step = { kind: 'line'; to: Pt } | { kind: 'arc'; to: Pt; mid: Pt } | { kind: 'bezier'; to: Pt; spans: Span[] };
@@ -28,11 +29,19 @@ export function sketchLoops(sk: Sketch): ProfileResult {
     loops.push({ kind: 'circle', center: c, radius: e.radius, poly });
   }
 
+  for (const e of sk.entities) {
+    if (e.kind !== 'text' || e.construction) continue;
+    const cs = textContours(e.text, pointOf(sk, e.at), e.height, e.angle);
+    if ('error' in cs) return { loops: [], error: cs.error };
+    for (const c of cs) loops.push({ kind: 'path', start: c.start, steps: c.steps, poly: c.poly });
+  }
+
   const segs = sk.entities.filter(
     (e): e is Extract<Sketch['entities'][number], { kind: 'line' | 'arc' | 'spline' }> =>
       (e.kind === 'line' || e.kind === 'arc' || e.kind === 'spline') && !e.construction,
   );
   if (!segs.length && !loops.length) return { loops: [], error: 'The sketch has no solid lines to build from.' };
+  if (!segs.length) return { loops };
   const ends = (s: (typeof segs)[number]): [Id, Id] =>
     s.kind === 'line' ? [s.p1, s.p2] : s.kind === 'arc' ? [s.start, s.end] : [s.points[0], s.points[s.points.length - 1]];
 

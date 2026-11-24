@@ -9,6 +9,7 @@ import { useKernel } from '../store/rebuild';
 import { DEFAULT_FRAMES, frameForSketch, planeFrame, toLocal, toWorld, add, dot, scale, sub, type Frame, type Vec3 } from '../model/planes';
 import { resolveAxis, type AxisDef } from '../model/axes';
 import { helixGeom, helixPoints } from '../model/helix';
+import { textContours, useSketchFont } from '../model/text';
 import { arcMid, candidateEdges, candidateVertices, distToSegments, edgePoint, faceFrame, facePointWorld, pickFace, vertexPoint } from '../model/refs';
 import type { EdgeRef, FaceRef, FacePoint, Id, PartDocument, PlaneFeature, Pt, Sketch, VertexRef } from '../model/types';
 import type { MeshData } from '../kernel/client';
@@ -372,7 +373,7 @@ function Body() {
   const picking = mode.kind === 'feature' && (mode.draft.type === 'fillet' || mode.draft.type === 'chamfer');
   const facePicking =
     mode.kind === 'feature' &&
-    (mode.draft.type === 'hole' || mode.draft.type === 'shell' || ((mode.draft.type === 'extrude' || mode.draft.type === 'cutExtrude') && mode.draft.direction1.type === 'upToFace'));
+    (mode.draft.type === 'hole' || mode.draft.type === 'shell' || mode.draft.type === 'dome' || ((mode.draft.type === 'extrude' || mode.draft.type === 'cutExtrude') && mode.draft.direction1.type === 'upToFace'));
   const vertexPicking = mode.kind === 'feature' && (mode.draft.type === 'extrude' || mode.draft.type === 'cutExtrude') && mode.draft.direction1.type === 'upToVertex';
   const pickedVertex = vertexPicking && 'direction1' in mode.draft && mode.draft.direction1.type === 'upToVertex' ? mode.draft.direction1.vertex : null;
   const measuring = useView((s) => s.measuring) && mode.kind === 'model';
@@ -474,6 +475,7 @@ function Body() {
       const fp = facePointAt(e);
       if (!fp) return useDoc.getState().notify('info', 'Only flat faces made by an extrude or cut can be picked for now.');
       if (mode.kind === 'feature' && mode.draft.type === 'hole') useDoc.getState().setHolePoint(fp);
+      else if (mode.kind === 'feature' && mode.draft.type === 'dome') useDoc.getState().updateDraft((d) => void (d.type === 'dome' && (d.at = fp as never)));
       else if (mode.kind === 'feature' && 'direction1' in mode.draft) useDoc.getState().setUpToFace(fp.face);
       else useDoc.getState().toggleShellFace(fp);
       return;
@@ -624,6 +626,12 @@ function entityPoints(sk: Sketch, frame: Frame, id: Id, offset = lift): Vec3[] {
     return [...Array(65).keys()].map((i) => toWorld(frame, { x: c.x + e.radius * Math.cos((i / 64) * 2 * Math.PI), y: c.y + e.radius * Math.sin((i / 64) * 2 * Math.PI) }, offset));
   }
   if (e.kind === 'spline') return sampleSpline(e.points.map((id) => pointOf(sk, id))).map((q) => toWorld(frame, q, offset));
+  if (e.kind === 'text') {
+    // pairs of points (drawn as separate segments): one closed outline per letter part
+    const cs = textContours(e.text, pointOf(sk, e.at), e.height, e.angle);
+    if ('error' in cs) return [];
+    return cs.flatMap((c) => c.poly.flatMap((p, i) => [toWorld(frame, p, offset), toWorld(frame, c.poly[(i + 1) % c.poly.length], offset)]));
+  }
   if (e.kind === 'arc') {
     const c = pointOf(sk, e.center);
     const a = pointOf(sk, e.start);
@@ -644,6 +652,7 @@ function entityPoints(sk: Sketch, frame: Frame, id: Id, offset = lift): Vec3[] {
 const curves = (sk: Sketch) => sk.entities.filter((e) => e.kind !== 'point');
 
 function PassiveSketch({ sketch, frame, highlight }: { sketch: Sketch; frame: Frame; highlight: boolean }) {
+  useSketchFont();
   return (
     <>
       {curves(sketch).map((e) =>
@@ -651,6 +660,7 @@ function PassiveSketch({ sketch, frame, highlight }: { sketch: Sketch; frame: Fr
           <Line
             key={e.id}
             points={entityPoints(sketch, frame, e.id)}
+            segments={e.kind === 'text'}
             color={highlight ? C.selected : C['sketch-construction']}
             lineWidth={highlight ? 2.5 : 1.5}
             dashed={e.construction}
@@ -682,6 +692,14 @@ function distToEntity(sk: Sketch, id: Id, p: Pt): number {
     return best;
   }
   if (e.kind === 'line') return distToSegment(p, pointOf(sk, e.p1), pointOf(sk, e.p2));
+  if (e.kind === 'text') {
+    // anywhere over the text's box picks it
+    const cs = textContours(e.text, pointOf(sk, e.at), e.height, e.angle);
+    if ('error' in cs) return Infinity;
+    const all = cs.flatMap((c) => c.poly);
+    const [x0, x1, y0, y1] = [Math.min(...all.map((q) => q.x)), Math.max(...all.map((q) => q.x)), Math.min(...all.map((q) => q.y)), Math.max(...all.map((q) => q.y))];
+    return Math.hypot(Math.max(x0 - p.x, 0, p.x - x1), Math.max(y0 - p.y, 0, p.y - y1));
+  }
   if (e.kind === 'circle') {
     const c = pointOf(sk, e.center);
     return Math.abs(Math.hypot(p.x - c.x, p.y - c.y) - e.radius);
@@ -699,6 +717,7 @@ function distToEntity(sk: Sketch, id: Id, p: Pt): number {
 }
 
 function ActiveSketch({ sketchId, doc }: { sketchId: Id; doc: PartDocument }) {
+  useSketchFont();
   const mode = useDoc((s) => s.mode);
   const solve = useDoc((s) => s.solve);
   const editingDimId = useDoc((s) => s.editingDimId);
@@ -863,6 +882,13 @@ function ActiveSketch({ sketchId, doc }: { sketchId: Id; doc: PartDocument }) {
     if (tool === 'point') {
       store.addPoint(pk);
       setPicks([]);
+    } else if (tool === 'text') {
+      const id = store.addText(pk);
+      setPicks([]);
+      if (id) {
+        store.setTool('select');
+        useView.getState().setSketchSel([id]);
+      }
     } else if (tool === 'rect' && all.length === 2) {
       store.addRect(all[0], all[1]);
       setPicks([]);
@@ -982,6 +1008,7 @@ function ActiveSketch({ sketchId, doc }: { sketchId: Id; doc: PartDocument }) {
         <Line
           key={c.id}
           points={entityPoints(sk, frame, c.id)}
+          segments={c.kind === 'text'}
           color={colorFor(c.id, c.construction)}
           lineWidth={c.id === hoverId || selected.includes(c.id) ? 3 : 2}
           dashed={c.construction}

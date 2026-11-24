@@ -7,6 +7,7 @@ import { Button, IconButton } from '../ui/Button';
 import { Checkbox, NumberField, Select, SelectionBox } from '../ui/Fields';
 import { MessageBanner, PanelSection } from '../ui/Panel';
 import { Modal } from '../ui/Overlay';
+import { roundFaces } from '../store/docStore';
 import { useDoc } from '../store/docStore';
 import { useKernel } from '../store/rebuild';
 import { kernel } from '../kernel/client';
@@ -87,6 +88,55 @@ export function MoreFeatureOptions({ draft }: { draft: D }) {
         <NumberField label="Wall thickness" value={draft.thickness.expr} {...len} onCommit={(expr, value) => s.updateDraft((d) => void (d.type === 'shell' && (d.thickness = { expr, value })))} />
       </PanelSection>
     );
+
+  if (draft.type === 'dome')
+    return (
+      <PanelSection title="Dome">
+        <SelectionBox
+          label="Face"
+          prompt="Click the flat face to dome"
+          focused
+          items={draft.at ? [faceLabel(doc, draft.at.face)] : []}
+          onRemove={() => s.updateDraft((d) => void (d.type === 'dome' && (d.at = null)))}
+        />
+        <NumberField label="Dome height" value={draft.height.expr} {...len} onCommit={(expr, value) => s.updateDraft((d) => void (d.type === 'dome' && (d.height = { expr, value })))} />
+        <Checkbox label="Dent into the part" checked={draft.reverse} onChange={(v) => s.updateDraft((d) => void (d.type === 'dome' && (d.reverse = v)))} />
+        <p className="text-2xs text-text-muted">A round face gets a smooth cap. On other shapes the dome reaches the face's farthest corner, so its sides rise straight up.</p>
+      </PanelSection>
+    );
+
+  if (draft.type === 'wrap') {
+    const used = new Set(doc.features.flatMap((f) => sketchesOf(f)));
+    const sketches = doc.features.slice(0, doc.rollbackIndex).filter((f) => f.type === 'sketch' && (!used.has(f.id) || f.id === draft.sketchId));
+    const rounds = roundFaces(doc);
+    const key = (v: { featureId: string; entityId: string }) => `${v.featureId}/${v.entityId}`;
+    return (
+      <PanelSection title="Wrap">
+        <Select label="Sketch to wrap" value={draft.sketchId} onChange={(v) => s.updateDraft((d) => void (d.type === 'wrap' && (d.sketchId = v)))} options={sketches.map((f) => ({ value: f.id, label: f.name }))} />
+        <Select
+          label="Round face"
+          value={key(draft.cylinder)}
+          onChange={(v) => s.updateDraft((d) => void (d.type === 'wrap' && (d.cylinder = rounds.find((r) => key(r.value) === v)!.value)))}
+          options={rounds.map((r) => ({ value: key(r.value), label: r.label }))}
+        />
+        <Select label="Wrap type" value={draft.mode} onChange={(v) => s.updateDraft((d) => void (d.type === 'wrap' && (d.mode = v as 'emboss' | 'deboss')))} options={[{ value: 'emboss', label: 'Emboss (raised)' }, { value: 'deboss', label: 'Deboss (sunk)' }]} />
+        <NumberField label="Wrap depth" value={draft.depth.expr} {...len} onCommit={(expr, value) => s.updateDraft((d) => void (d.type === 'wrap' && (d.depth = { expr, value })))} />
+        <Checkbox label="Wrap on the far side" checked={draft.flip} onChange={(v) => s.updateDraft((d) => void (d.type === 'wrap' && (d.flip = v)))} />
+        <p className="text-2xs text-text-muted">Draw on a plane parallel to the round face's axis. Widths across the sketch become lengths round the face, unstretched.</p>
+      </PanelSection>
+    );
+  }
+
+  if (draft.type === 'splitLine') {
+    const used = new Set(doc.features.flatMap((f) => sketchesOf(f)));
+    const sketches = doc.features.slice(0, doc.rollbackIndex).filter((f) => f.type === 'sketch' && (!used.has(f.id) || f.id === draft.sketchId));
+    return (
+      <PanelSection title="Split line">
+        <Select label="Outline sketch" value={draft.sketchId} onChange={(v) => s.updateDraft((d) => void (d.type === 'splitLine' && (d.sketchId = v)))} options={sketches.map((f) => ({ value: f.id, label: f.name }))} />
+        <p className="text-2xs text-text-muted">The face the sketch is drawn on is divided along its closed outlines. Give the split line a colour to paint the inside.</p>
+      </PanelSection>
+    );
+  }
 
   if (draft.type === 'sketchPattern') {
     const candidates = doc.features.slice(0, doc.rollbackIndex).filter((f) => isSeedType(f.type));
@@ -291,6 +341,7 @@ export function needsPick(d: D): string | null {
   if (d.type === 'fillet' || d.type === 'chamfer') return d.edges.length ? null : 'Click edges on the model to add or remove them.';
   if (d.type === 'hole') return d.at ? null : 'Click a flat face where the hole should start.';
   if (d.type === 'shell') return d.faces.length ? null : 'Click the faces to open. The rest becomes a wall.';
+  if (d.type === 'dome') return d.at ? null : 'Click the flat face to dome.';
   if (d.type === 'linearPattern' || d.type === 'circularPattern' || d.type === 'mirror' || d.type === 'sketchPattern') return d.seeds.length ? null : 'Tick the features to repeat.';
   if ((d.type === 'extrude' || d.type === 'cutExtrude') && d.direction1.type === 'upToFace' && !d.direction1.face) return 'Click the flat face to extrude up to.';
   if ((d.type === 'extrude' || d.type === 'cutExtrude') && d.direction1.type === 'upToVertex' && !d.direction1.vertex) return 'Click near a corner of the model to extrude up to.';
@@ -791,7 +842,7 @@ export function DraftOption({ draft }: { draft: D }) {
 
 export function FaceColour({ draft }: { draft: D }) {
   const s = useDoc.getState();
-  if (!isSeedType(draft.type)) return null;
+  if (!isSeedType(draft.type) && draft.type !== 'splitLine') return null;
   return (
     <PanelSection title="Appearance">
       <Select

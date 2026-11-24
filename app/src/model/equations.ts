@@ -98,6 +98,12 @@ function featureParams(f: Draft<Feature>, each: (p: Draft<Param> | undefined, ki
       each(f.pitch, 'length');
       each(f.turns, 'count');
       break;
+    case 'dome':
+      each(f.height, 'length');
+      break;
+    case 'wrap':
+      each(f.depth, 'length');
+      break;
     case 'shell':
       each(f.thickness, 'length');
       break;
